@@ -10,22 +10,40 @@ using Core: LLVMPtr
 
 # Maps PTX types to Julia array types
 const map_ptx_to_jl_array = Dict(
+                                 "u8"  => UInt8,
+                                 "s8"  => Int8,
+                                 "s32" => Int32,
                                  "f16" => Float16,
                                  "f32" => Float32
                                 )
 
 # Maps PTX types to Julia fragment types
 const map_ptx_to_jl_frag = Dict(
+                                "u8"  => UInt32,
+                                "s8"  => UInt32,
+                                "s32" => Int32,
                                 "f16" => NTuple{2, VecElement{Float16}},
                                 "f32" => Float32
                                )
 
 # Maps matrix & PTX types to fragment sizes
 const map_frag_sizes = Dict(
+                            "a.b1"  => 1,
+                            "a.u4"  => 2,
+                            "a.s4"  => 2,
+                            "a.u8"  => 2,
+                            "a.s8"  => 2,
                             "a.f16" => 8,
+
+                            "b.u8"  => 2,
+                            "b.s8"  => 2,
                             "b.f16" => 8,
+
+			                "c.s32" => 8,
                             "c.f16" => 4,
                             "c.f32" => 8,
+                            
+                            "d.s32" => 8,
                             "d.f16" => 4,
                             "d.f32" => 8
                            )
@@ -37,6 +55,21 @@ const map_ptx_as_to_as_ty = Dict(
                                  "global" => AS.Global
                                 )
 
+ldst_int_ab_ops = ["m16n16k16"], ["a", "b"], ["u8, s8"]
+ldst_int_cd_ops = ["m16n16k16"], ["c", "d"], ["s32"]
+
+ldst_ab_ops = ["m16n16k16", "m32n8k16", "m8n32k16"], ["a", "b"], ["f16", "u8", "s8"]
+ldst_cd_ops = ["m16n16k16", "m32n8k16", "m8n32k16"], ["c", "d"], ["f16", "f32", "s32"]
+ldst_subint_ab_ops = ["m8n8k32"], ["a", "b"], ["s4","u4"]
+ldst_bit_ab_ops = ["m8n8k128"], ["a", "b"], ["b1"]
+ldst_subint_cd_ops = ["m8n8k32", "m8n8k128"],  ["c", "d"], ["s32"]
+
+all_ldst_ops = vcat(ldst_ab_ops, ldst_cd_ops)
+                    #ldst_subint_ab_ops,
+                    #ldst_bit_ab_ops,
+                    #ldst_subint_cd_ops);
+
+println("Loading new WMMA!")
 ################################################################################
 # HELPER FUNCTIONS
 ################################################################################
@@ -93,19 +126,29 @@ Wrapper around the LLVM intrinsic `@llvm.nvvm.wmma.load.{matrix}.sync.{layout}.{
 llvm_wmma_load() = error("Cannot call llvm_wmma_load without values for placeholders!")
 export llvm_wmma_load
 
-for mat in ["a", "b", "c"],
+# for mat in ["a", "b", "c"],
+#     layout in ["col", "row"],
+#     shape in ["m16n16k16"],
+#     addr_space in ["", "shared", "global"],
+#     stride in ["stride"],
+#     elem_type in ["f16", "f32"]
+
+for ops in all_ldst_ops,
+    shape in ops[1],
+    mat in ops[2],
+    elem_type in ops[3],
     layout in ["col", "row"],
-    shape in ["m16n16k16"],
     addr_space in ["", "shared", "global"],
-    stride in ["stride"],
-    elem_type in ["f16", "f32"]
+    stride in ["stride"]
+
+
 
     # TODO: Non-stride versions?
 
     # Float32 is only supported for C
-    if (elem_type == "f32") && (mat != "c")
-        continue
-    end
+    # if (elem_type == "f32") && (mat != "c")
+    #     continue
+    # end
 
     addr_space_int = get_addrspace_info(addr_space)
 
@@ -151,13 +194,24 @@ Wrapper around the LLVM intrinsic `@llvm.nvvm.wmma.store.d.sync.{layout}.{shape}
 llvm_wmma_store() = error("Cannot call llvm_wmma_store without values for placeholders!")
 export llvm_wmma_store
 
-for mat in ["d"],
-    layout in ["col", "row"],
-    shape in ["m16n16k16"],
-    addr_space in ["", "shared", "global"],
-    stride in ["stride"],
-    elem_type in ["f16", "f32"]
+# for mat in ["d"],
+#     layout in ["col", "row"],
+#     shape in ["m16n16k16"],
+#     addr_space in ["", "shared", "global"],
+#     stride in ["stride"],
+#     elem_type in ["f16", "f32"]
 
+    for ops in all_ldst_ops,
+        shape in ops[1],
+        mat in ops[2],
+        elem_type in ops[3],
+        layout in ["col", "row"],
+        addr_space in ["", "shared", "global"],
+        stride in ["stride"]
+
+    if mat != "d"
+        continue
+    end
     # TODO: Non-stride versions?
 
     addr_space_int = get_addrspace_info(addr_space)
