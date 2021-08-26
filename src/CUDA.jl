@@ -8,15 +8,15 @@ using LLVM
 using LLVM.Interop
 using Core: LLVMPtr
 
-using Adapt
+using Adapt: Adapt, adapt, WrappedArray
 
-using Requires
+using Requires: @require
 
 using LinearAlgebra
 
-using BFloat16s
+using BFloat16s: BFloat16
 
-using ExprTools
+using ExprTools: splitdef, combinedef
 
 # TODO: set lib versions in bindeps or so
 
@@ -61,6 +61,7 @@ include("device/intrinsics.jl")
 include("device/runtime.jl")
 include("device/texture.jl")
 include("device/random.jl")
+include("device/sparse.jl")
 include("device/quirks.jl")
 
 # array essentials
@@ -112,5 +113,6 @@ const has_nvml = NVML.has_nvml
 export NVML, has_nvml
 
 include("deprecated.jl")
+include("precompile.jl")
 
 end

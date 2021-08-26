@@ -4,7 +4,7 @@ export
     threadIdx, blockDim, blockIdx, gridDim, laneid, warpsize, active_mask, FULL_MASK
 
 @generated function _index(::Val{name}, ::Val{range}) where {name, range}
-    JuliaContext() do ctx
+    Context() do ctx
         T_int32 = LLVM.Int32Type(ctx)
 
         # create function
@@ -13,7 +13,7 @@ export
 
         # generate IR
         Builder(ctx) do builder
-            entry = BasicBlock(llvm_f, "entry", ctx)
+            entry = BasicBlock(llvm_f, "entry"; ctx)
             position!(builder, entry)
 
             # call the indexing intrinsic
@@ -22,8 +22,8 @@ export
             idx = call!(builder, intr)
 
             # attach range metadata
-            range_metadata = MDNode([ConstantInt(Int32(range.start), ctx),
-                                    ConstantInt(Int32(range.stop), ctx)],
+            range_metadata = MDNode([ConstantInt(Int32(range.start); ctx),
+                                     ConstantInt(Int32(range.stop); ctx)];
                                     ctx)
             metadata(idx)[LLVM.MD_range] = range_metadata
 
@@ -60,6 +60,8 @@ for dim in (:x, :y, :z)
     intr = Symbol("nctaid.$dim")
     @eval @inline $fn() = Int(_index($(Val(intr)), $(Val(1:max_grid_size[dim]))))
 end
+
+@device_functions begin
 
 """
     gridDim()::CuDim3
@@ -110,5 +112,7 @@ Returns a 32-bit mask indicating which threads in a warp are active with the cur
 executing thread.
 """
 @inline active_mask() = @asmcall("activemask.b32 \$0;", "=r", false, UInt32, Tuple{})
+
+end
 
 const FULL_MASK = 0xffffffff

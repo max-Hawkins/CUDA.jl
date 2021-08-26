@@ -6,9 +6,7 @@ using ..CUDA
 using ..CUDA: CUstream, cudaDataType
 using ..CUDA: libcutensor,  @retry_reclaim
 
-using CEnum
-
-using DataStructures
+using CEnum: @cenum
 
 
 const cudaDataType_t = cudaDataType

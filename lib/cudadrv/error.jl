@@ -76,16 +76,16 @@ Base.show(io::IO, ::MIME"text/plain", err::CuError) = print(io, "CuError($(err.c
 
 ## API call wrapper
 
-const __initialized_driver = Ref(false)
+const __initialized_driver = LazyInitialized{Bool}()
 @inline function initialize_api()
-    if !__initialized_driver[]
+    get!(__initialized_driver; hook=__init_driver__) do
         if haskey(ENV, "_") && basename(ENV["_"]) == "rr"
-            error("Running under rr, which is incompatible with CUDA")
+            @error("Running under rr, which is incompatible with CUDA")
+            return false
         end
         cuInit(0)
 
-        __initialized_driver[] = true
-        __init_driver__()
+        return true
     end
     return
 end

@@ -1,24 +1,6 @@
-export NonReentrantLock, @spinlock, @lock, LazyInitialized
+export @spinlock, @lock, LazyInitialized
 
 const var"@lock" = Base.var"@lock"
-
-# a simple non-reentrant lock that errors when trying to reenter on the same task
-struct NonReentrantLock <: Threads.AbstractLock
-  rl::ReentrantLock
-  NonReentrantLock() = new(ReentrantLock())
-end
-
-function Base.lock(nrl::NonReentrantLock)
-  @assert !islocked(nrl.rl) || nrl.rl.locked_by !== current_task()
-  lock(nrl.rl)
-end
-
-function Base.trylock(nrl::NonReentrantLock)
-  @assert !islocked(nrl.rl) || nrl.rl.locked_by !== current_task()
-  trylock(nrl.rl)
-end
-
-Base.unlock(nrl::NonReentrantLock) = unlock(nrl.rl)
 
 # a safe way to acquire locks from finalizers, where we can't wait (which switches tasks)
 macro spinlock(l, ex)
@@ -40,43 +22,48 @@ end
 
 
 """
-    LazyInitialized{T}() do
-        # initialization, producing a value of type T
-    end
+    LazyInitialized{T}()
 
-A thread-safe, lazily-initialized wrapper for a value of type `T`. Fetch the value by
-calling `getindex`. The constructor is ensured to only be called once from a single thread.
+A thread-safe, lazily-initialized wrapper for a value of type `T`. Initialize and fetch the
+value by calling `get!`. The constructor is ensured to only be called once.
 
 This type is intended for lazy initialization of e.g. global structures, without using
 `__init__`. It is similar to protecting accesses using a lock, but is much cheaper.
 
 """
-struct LazyInitialized{T,F}
+struct LazyInitialized{T}
     # 0: uninitialized
     # 1: initializing
     # 2: initialized
     guard::Threads.Atomic{Int}
     value::Base.RefValue{T}
-    constructor::F
 
-    LazyInitialized{T,F}(constructor::F) where {T,F} =
-        new(Threads.Atomic{Int}(0), Ref{T}(), constructor)
+    LazyInitialized{T}() where {T} =
+        new(Threads.Atomic{Int}(0), Ref{T}())
 end
-LazyInitialized{T}(constructor::F) where {T,F} = LazyInitialized{T,F}(constructor)
 
-function Base.getindex(x::LazyInitialized)
+function Base.get!(constructor, x::LazyInitialized; hook=nothing)
     while x.guard[] != 2
-        initialize!(x)
+        initialize!(x, constructor, hook)
     end
     assume(isassigned(x.value)) # to get rid of the check
     x.value[]
 end
 
-@noinline function initialize!(x::LazyInitialized)
+@noinline function initialize!(x::LazyInitialized, constructor::F1, hook::F2) where {F1, F2}
     status = Threads.atomic_cas!(x.guard, 0, 1)
     if status == 0
-        x.value[] = x.constructor()
-        x.guard[] = 2
+        try
+          x.value[] = constructor()
+          x.guard[] = 2
+        catch
+          x.guard[] = 0
+          rethrow()
+        end
+
+        if hook !== nothing
+          hook()
+        end
     else
         yield()
     end

@@ -1,4 +1,9 @@
+# TODO: unify with Base.@atomic
+using CUDA: @atomic
+
 @testset "atomics (low-level)" begin
+
+# tested on all natively-supported atomics
 
 @testset "atomic_add" begin
     types = [Int32, Int64, UInt32, UInt64, Float32]
@@ -20,7 +25,6 @@ end
 
 @testset "atomic_sub" begin
     types = [Int32, Int64, UInt32, UInt64]
-    capability(device()) >= v"6.0" && append!(types, [Float32, Float64])
 
     @testset for T in types
         a = CuArray(T[2048])
@@ -137,10 +141,11 @@ end
     end
 end
 
-if capability(device()) >= v"6.0"
-
 @testset "atomic_cas" begin
-    @testset for T in [Int32, Int64, Float32, Float64]
+    types = [Int32, Int64, UInt32, UInt64]
+    capability(device()) >= v"7.0" && push!(types, UInt16)
+
+    @testset for T in types
         a = CuArray(T[0])
 
         function kernel(a, b, c)
@@ -153,11 +158,8 @@ if capability(device()) >= v"6.0"
     end
 end
 
-end
-
 @testset "atomic_max" begin
     types = [Int32, Int64, UInt32, UInt64]
-    capability(device()) >= v"6.0" && append!(types, [Float32, Float64])
 
     @testset for T in types
         a = CuArray([zero(T)])
@@ -175,7 +177,6 @@ end
 
 @testset "atomic_min" begin
     types = [Int32, Int64, UInt32, UInt64]
-    capability(device()) >= v"6.0" && append!(types, [Float32, Float64])
 
     @testset for T in types
         a = CuArray(T[1024])
@@ -191,39 +192,9 @@ end
     end
 end
 
-if capability(device()) >= v"6.0"
-
-@testset "atomic_mul" begin
-    @testset for T in [Float32, Float64]
-        a = CuArray([one(T)])
-
-        function kernel(a, b)
-            CUDA.atomic_mul!(pointer(a), b)
-            return
-        end
-
-        @cuda threads=10 kernel(a, T(2))
-        @test Array(a)[1] == 1024
-    end
-end
-
-@testset "atomic_div" begin
-    @testset for T in [Float32, Float64]
-        a = CuArray(T[1024])
-
-        function kernel(a, b)
-            CUDA.atomic_div!(pointer(a), b)
-            return
-        end
-
-        @cuda threads=10 kernel(a, T(2))
-        @test Array(a)[1] == one(T)
-    end
-end
-
 @testset "shared memory" begin
     function kernel()
-        shared = @cuStaticSharedMem(Float32, 1)
+        shared = CuStaticSharedArray(Float32, 1)
         @atomic shared[threadIdx().x] += 0f0
         return
     end
@@ -233,14 +204,13 @@ end
 
 end
 
-end
-
 @testset "atomics (high-level)" begin
 
+# tested on all types supported by atomic_cas! (which empowers the fallback definition)
+
 @testset "add" begin
-    types = [Int32, Int64, UInt32, UInt64, Float32]
-    capability(device()) >= v"6.0" && push!(types, Float64)
-    capability(device()) >= v"7.0" && push!(types, Float16)
+    types = [Int32, Int64, UInt32, UInt64, Float32, Float64]
+    capability(device()) >= v"7.0" && append!(types, [Int16, UInt16, Float16])
 
     @testset for T in types
         a = CuArray([zero(T)])
@@ -257,8 +227,11 @@ end
 end
 
 @testset "sub" begin
-    @testset for T in [Int32, Int64, UInt32, UInt64]
-        a = CuArray(T[4096])
+    types = [Int32, Int64, UInt32, UInt64, Float32, Float64]
+    capability(device()) >= v"7.0" && append!(types, [Int16, UInt16, Float16])
+
+    @testset for T in types
+        a = CuArray(T[2048])
 
         function kernel(T, a)
             @atomic a[1] = a[1] - 1
@@ -267,12 +240,13 @@ end
         end
 
         @cuda threads=1024 kernel(T, a)
-        @test Array(a)[1] == 2048
+        @test Array(a)[1] == 0
     end
 end
 
 @testset "mul" begin
-    types = (capability(device()) >= v"6.0") ? [Float32, Float64] : []
+    types = [Int32, Int64, UInt32, UInt64, Float32, Float64]
+    capability(device()) >= v"7.0" && append!(types, [Int16, UInt16, Float16])
 
     @testset for T in types
         a = CuArray(T[1])
@@ -283,16 +257,17 @@ end
             return
         end
 
-        @cuda threads=8 kernel(T, a)
-        @test Array(a)[1] == 65536
+        @cuda threads=5 kernel(T, a)
+        @test Array(a)[1] == 1024
     end
 end
 
 @testset "div" begin
-    types = (capability(device()) >= v"6.0") ? [Float32, Float64] : []
+    types = [Int32, Int64, UInt32, UInt64, Float32, Float64]
+    capability(device()) >= v"7.0" && append!(types, [Int16, UInt16, Float16])
 
     @testset for T in types
-        a = CuArray(T[65536])
+        a = CuArray(T[1024])
 
         function kernel(T, a)
             @atomic a[1] = a[1] / 2
@@ -300,13 +275,16 @@ end
             return
         end
 
-        @cuda threads=8 kernel(T, a)
+        @cuda threads=5 kernel(T, a)
         @test Array(a)[1] == 1
     end
 end
 
 @testset "and" begin
-    @testset for T in [Int32, Int64, UInt32, UInt64]
+    types = [Int32, Int64, UInt32, UInt64]
+    capability(device()) >= v"7.0" && append!(types, [Int16, UInt16])
+
+    @testset for T in types
         a = CuArray([~zero(T), ~zero(T)])
 
         function kernel(T, a)
@@ -324,7 +302,10 @@ end
 end
 
 @testset "or" begin
-    @testset for T in [Int32, Int64, UInt32, UInt64]
+    types = [Int32, Int64, UInt32, UInt64]
+    capability(device()) >= v"7.0" && append!(types, [Int16, UInt16])
+
+    @testset for T in types
         a = CuArray([zero(T), zero(T)])
 
         function kernel(T, a)
@@ -342,7 +323,10 @@ end
 end
 
 @testset "xor" begin
-    @testset for T in [Int32, Int64, UInt32, UInt64]
+    types = [Int32, Int64, UInt32, UInt64]
+    capability(device()) >= v"7.0" && append!(types, [Int16, UInt16])
+
+    @testset for T in types
         a = CuArray([zero(T), zero(T)])
 
         function kernel(T, a)
@@ -361,7 +345,10 @@ end
 end
 
 @testset "max" begin
-    @testset for T in [Int32, Int64, UInt32, UInt64]
+    types = [Int32, Int64, UInt32, UInt64, Float32, Float64]
+    capability(device()) >= v"7.0" && append!(types, [Int16, UInt16, Float16])
+
+    @testset for T in types
         a = CuArray([zero(T)])
 
         function kernel(T, a)
@@ -376,7 +363,10 @@ end
 end
 
 @testset "min" begin
-    @testset for T in [Int32, Int64, UInt32, UInt64]
+    types = [Int32, Int64, UInt32, UInt64, Float32, Float64]
+    capability(device()) >= v"7.0" && append!(types, [Int16, UInt16, Float16])
+
+    @testset for T in types
         a = CuArray([typemax(T)])
 
         function kernel(T, a)
@@ -387,6 +377,23 @@ end
 
         @cuda threads=32 kernel(T, a)
         @test Array(a)[1] == 1
+    end
+end
+
+@testset "shift" begin
+    types = [Int32, Int64, UInt32, UInt64]
+    capability(device()) >= v"7.0" && append!(types, [Int16, UInt16])
+
+    @testset for T in types
+        a = CuArray([one(T)])
+
+        function kernel(T, a)
+            @atomic a[1] <<= 1
+            return
+        end
+
+        @cuda threads=8 kernel(T, a)
+        @test Array(a)[1] == 1<<8
     end
 end
 
@@ -418,7 +425,7 @@ end
     # https://github.com/JuliaGPU/CUDA.jl/issues/311
 
     function kernel(a)
-        b = CUDA.@cuStaticSharedMem(Int, 1)
+        b = CUDA.CuStaticSharedArray(Int, 1)
 
         if threadIdx().x == 1
             b[] = a[]
@@ -443,10 +450,9 @@ end
     # shared memory atomics resulted in illegal memory accesses
     # https://github.com/JuliaGPU/CUDA.jl/issues/558
 
-
     function kernel()
         tid = threadIdx().x
-        shared = @cuStaticSharedMem(Float32, 4)
+        shared = CuStaticSharedArray(Float32, 4)
         CUDA.atomic_add!(pointer(shared, tid), shared[tid + 2])
         sync_threads()
         CUDA.atomic_add!(pointer(shared, tid), shared[tid + 2])

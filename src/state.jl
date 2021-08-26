@@ -59,7 +59,7 @@ function validate_task_local_state(state::TaskLocalState)
     #       since we can't touch other tasks' local state from `device_reset!`)
     if !isvalid(state.context)
         device!(state.device)
-        state.streams[deviceid(state.device)+1] = nothing
+        @inbounds state.streams[deviceid(state.device)+1] = nothing
     end
     return state
 end
@@ -207,18 +207,22 @@ function device()
     task_local_state!().device
 end
 
-const __device_contexts = LazyInitialized{Vector{Union{Nothing,CuContext}}}() do
+const __device_contexts = LazyInitialized{Vector{Union{Nothing,CuContext}}}()
+device_contexts() = get!(__device_contexts) do
     [nothing for _ in 1:ndevices()]
 end
-function device_context(i)
-    contexts = __device_contexts[]
+function device_context(i::Int)
+    contexts = device_contexts()
+    assume(isassigned(contexts, i))
     @inbounds contexts[i]
 end
-function device_context!(i, ctx)
-    contexts = __device_contexts[]
+function device_context!(i::Int, ctx)
+    contexts = device_contexts()
     @inbounds contexts[i] = ctx
     return
 end
+device_context(dev::CuDevice) = device_context(deviceid(dev)+1)
+device_context!(dev::CuDevice, ctx) = device_context!(deviceid(dev)+1, ctx)
 
 function context(dev::CuDevice)
     devidx = deviceid(dev)+1
@@ -270,6 +274,8 @@ function device!(dev::CuDevice, flags=nothing)
         state.device = dev
         state.context = context(dev)
     end
+
+    dev
 end
 
 macro device!(dev, body)
@@ -292,29 +298,17 @@ function device!(f::Function, dev::CuDevice)
 end
 
 # NVIDIA bug #3240770
-can_reset_device() = !(release() == v"11.2" && any(dev->pools[dev].stream_ordered, devices()))
+can_reset_device() = !(release() == v"11.2" && any(dev->stream_ordered(dev), devices()))
 
 """
     device_reset!(dev::CuDevice=device())
 
 Reset the CUDA state associated with a device. This call with release the underlying
 context, at which point any objects allocated in that context will be invalidated.
-
-!!! warning
-
-    This function is broken on CUDA 11.2 when using the CUDA memory pool (the default).
-    If you need to reset the device, use another memory pool by setting the
-    `JULIA_CUDA_MEMORY_POOL` environment variable to, e.g., `binned` before importing
-    this package.
 """
 function device_reset!(dev::CuDevice=device())
     if !can_reset_device()
-        @error """Due to a bug in CUDA, resetting the device is not possible on CUDA 11.2 when using the stream-ordered memory allocator.
-
-                  If you are calling this function to free memory, that may not be required anymore
-                  as the stream-ordered memory allocator releases memory much more eagerly.
-                  If you do need this functionality, switch to another memory pool by setting
-                  the `JULIA_CUDA_MEMORY_POOL` environment variable to, e.g., `binned`."""
+        @error "Due to a bug in CUDA, resetting the device is not possible on CUDA 11.2 when using the stream-ordered memory allocator."
         return
     end
 
@@ -344,69 +338,6 @@ Get the ID number of the current device of execution. This is a 0-indexed number
 corresponding to the device ID as known to CUDA.
 """
 deviceid(dev::CuDevice=device()) = Int(convert(CUdevice, dev))
-
-
-## helpers
-
-"""
-    PerDevice{T} do dev
-        # generate a value of type `T` for device `dev`
-    end
-
-A helper struct for maintaining per-device state that's lazily initialized and automatically
-invalidated when the device is reset. Use `per_device[dev::CuDevice]` to fetch a value.
-
-Mutating or deleting state is not supported. If this is required, use a `Ref` as value.
-
-Furthermore, even though the initialization of this helper, fetching its value for a
-given device, and clearing it when the device is reset are all performed in a thread-safe
-manner, you should still take care about thread-safety when using the contained value.
-For example, if you need to update the value, use atomics; if it's a complex structure like
-an array or a dictionary, use additional locks.
-"""
-struct PerDevice{T,F,L,C}
-    lock::ReentrantLock
-    constructor::F
-    values::L
-    contexts::C
-end
-
-function PerDevice{T}(constructor::F) where {T,F}
-    values = LazyInitialized{Vector{Union{Nothing,T}}}() do
-        [nothing for _ in 1:ndevices()]
-    end
-    contexts = LazyInitialized{Vector{Union{Nothing,CuContext}}}() do
-        [nothing for _ in 1:ndevices()]
-    end
-    PerDevice{T,F,typeof(values),typeof(contexts)}(ReentrantLock(), constructor, values, contexts)
-end
-
-function Base.getindex(x::PerDevice, dev::CuDevice)
-    id = deviceid(dev)+1
-    ctx = device_context(id)    # may be nothing
-    values = x.values[]
-    contexts = x.contexts[]
-    @inbounds begin
-        # test-lock-test
-        if values[id] === nothing || contexts[id] !== ctx
-            Base.@lock x.lock begin
-                if values[id] === nothing || contexts[id] !== ctx
-                    values[id] = x.constructor(dev)
-                    contexts[id] = ctx
-                end
-            end
-        end
-        values[id]
-    end
-end
-
-Base.length(x::PerDevice) = length(x.values[])
-Base.size(x::PerDevice) = size(x.values[])
-Base.keys(x::PerDevice) = keys(x.values[])
-
-function Base.show(io::IO, mime::MIME"text/plain", x::PerDevice{T}) where {T}
-    print(io, "PerDevice{$T} with $(length(x)) entries")
-end
 
 
 ## math mode
@@ -470,5 +401,80 @@ function stream!(f::Function, stream::CuStream)
         f()
     finally
         state.streams[devidx] = old_stream
+    end
+end
+
+
+## helpers
+
+"""
+    PerDevice{T}()
+
+A helper struct for maintaining per-device state that's lazily initialized and automatically
+invalidated when the device is reset. Use `get!(per_device, dev) do ... end` to initialize
+and fetch a value.
+
+Mutating or deleting state is not supported. If this is required, use a boxed value, like
+a `Ref` or a `Threads.Atomic`.
+
+Furthermore, even though the initialization of this helper, fetching its value for a
+given device, and clearing it when the device is reset are all performed in a thread-safe
+manner, you should still take care about thread-safety when using the contained value.
+For example, if you need to update the value, use atomics; if it's a complex structure like
+an array or a dictionary, use additional locks.
+"""
+struct PerDevice{T}
+    lock::ReentrantLock
+    values::LazyInitialized{Vector{Union{Nothing,Tuple{CuContext,T}}}}
+end
+
+function PerDevice{T}() where {T}
+    values = LazyInitialized{Vector{Union{Nothing,Tuple{CuContext,T}}}}()
+    PerDevice{T}(ReentrantLock(), values)
+end
+
+get_values(x::PerDevice) = get!(x.values) do
+    Base.fill(nothing, ndevices())
+end
+
+function Base.get(x::PerDevice, dev::CuDevice, val)
+    y = get_values(x)
+    id = deviceid(dev)+1
+    ctx = device_context(id)    # may be nothing
+    @inbounds begin
+        # test-lock-test
+        if y[id] === nothing || y[id][1] !== ctx
+            val
+        else
+            y[id][2]
+        end
+    end
+end
+
+function Base.get!(constructor::F, x::PerDevice, dev::CuDevice) where {F}
+    y = get_values(x)
+    id = deviceid(dev)+1
+    ctx = device_context(id)    # may be nothing
+    @inbounds begin
+        # test-lock-test
+        if y[id] === nothing || y[id][1] !== ctx
+            Base.@lock x.lock begin
+                if y[id] === nothing || y[id][1] !== ctx
+                    y[id] = (context(), constructor())
+                end
+            end
+        end
+        y[id][2]
+    end
+end
+
+Base.length(x::PerDevice) = length(get_values(x))
+Base.size(x::PerDevice) = size(get_values(x))
+Base.keys(x::PerDevice) = keys(get_values(x))
+
+function Base.show(io::IO, mime::MIME"text/plain", x::PerDevice{T}) where {T}
+    print(io, "PerDevice{$T}:")
+    for dev in devices()
+        print(io, "\n $(deviceid(dev)): ", get(x, dev, "#undef"))
     end
 end
