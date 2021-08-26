@@ -10,7 +10,7 @@ const map_ptx_to_jl_array = Dict(
 
 const map_ptx_to_jl_frag = Dict(
                                 "u8"  => Int32(707406378), #reinterpret(Int32, UInt8(42) * ones(UInt8, 4))
-                                "s8"  => Int32(707406378),
+                                "s8"  => Int32(707406378), #reinterpret(Int32, UInt8(42) * ones(UInt8, 4))
                                 "s32" => Int32(42),
                                 "f16" => ntuple(i -> VecElement{Float16}(42), 2),
                                 "f32" => Float32(42)
@@ -177,7 +177,7 @@ const map_ptx_to_jl_frag = Dict(
             @test new_a * new_b + c ≈ Array(d_dev) rtol=Base.rtoldefault(Float16)
         end
     end
-    # Integer WMMA
+    # Integer WMMA load and store operations
     ldst_int_ab_ops = ["m16n16k16"], ["a", "b"], ["u8", "s8"]
     ldst_int_cd_ops = ["m16n16k16"], ["c", "d"], ["s32"]
     all_ldst_ops = vcat(ldst_int_ab_ops, ldst_int_cd_ops) 
@@ -300,9 +300,6 @@ const map_ptx_to_jl_frag = Dict(
 
             a_elem_type = b_elem_type
 
-            # Type-dependent variables
-            # d_ty = d_elem_type == "f16" ? Float16 : Float32
-            # c_ty = c_elem_type == "f16" ? Float16 : Float32
             d_ty = Int32
             c_ty = Int32
             b_ty = map_ptx_to_jl_array[b_elem_type]
@@ -313,7 +310,6 @@ const map_ptx_to_jl_frag = Dict(
             ldb_func = getfield(Main, Symbol("llvm_wmma_load_b_$(b_layout)_m16n16k16_global_stride_$(b_elem_type)"))
             ldc_func = getfield(Main, Symbol("llvm_wmma_load_c_col_m16n16k16_global_stride_$(c_elem_type)"))
             mma_func = getfield(Main, Symbol("llvm_wmma_mma_$(a_layout)_$(b_layout)_m16n16k16_$(a_elem_type)"))
-            println("MMA func: $mma_func")
             std_func = getfield(Main, Symbol("llvm_wmma_store_d_col_m16n16k16_global_stride_$(d_elem_type)"))
 
             # Generate input matrices
@@ -344,8 +340,9 @@ const map_ptx_to_jl_frag = Dict(
 
             new_a = (a_layout == "col" ? a : transpose(a))
             new_b = (b_layout == "col" ? b : transpose(b))
-
-            @test new_a * new_b + c ≈ Array(d_dev) rtol=Base.rtoldefault(Float16)
+            # Cast a and b to prevent UInt8 rollover of resultant data
+            # TODO: Create explicit input arrays that prevent rollover? Which is prefered?
+            @test Int32.(new_a) * Int32.(new_b) + c == Array(d_dev)
         end
     end
 end

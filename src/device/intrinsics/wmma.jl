@@ -28,9 +28,6 @@ const map_ptx_to_jl_frag = Dict(
 
 # Maps matrix & PTX types to fragment sizes
 const map_frag_sizes = Dict(
-                            "a.b1"  => 1,
-                            "a.u4"  => 2,
-                            "a.s4"  => 2,
                             "a.u8"  => 2,
                             "a.s8"  => 2,
                             "a.f16" => 8,
@@ -55,11 +52,10 @@ const map_ptx_as_to_as_ty = Dict(
                                  "global" => AS.Global
                                 )
 
-ldst_int_ab_ops = ["m16n16k16"], ["a", "b"], ["u8", "s8"]
-ldst_int_cd_ops = ["m16n16k16"], ["c", "d"], ["s32"]
-
 ldst_ab_ops = ["m16n16k16", "m32n8k16", "m8n32k16"], ["a", "b"], ["f16", "u8", "s8"]
 ldst_cd_ops = ["m16n16k16", "m32n8k16", "m8n32k16"], ["c", "d"], ["f16", "f32", "s32"]
+ldst_int_ab_ops = ["m16n16k16"], ["a", "b"], ["u8", "s8"]
+ldst_int_cd_ops = ["m16n16k16"], ["c", "d"], ["s32"]
 ldst_subint_ab_ops = ["m8n8k32"], ["a", "b"], ["s4","u4"]
 ldst_bit_ab_ops = ["m8n8k128"], ["a", "b"], ["b1"]
 ldst_subint_cd_ops = ["m8n8k32", "m8n8k128"],  ["c", "d"], ["s32"]
@@ -69,7 +65,6 @@ all_ldst_ops = vcat(ldst_ab_ops, ldst_cd_ops)
                     #ldst_bit_ab_ops,
                     #ldst_subint_cd_ops);
 
-println("Loading new WMMA!")
 ################################################################################
 # HELPER FUNCTIONS
 ################################################################################
@@ -286,8 +281,6 @@ for ops in all_wmma_ops,
     c_elem_type in ops[3],
     b_elem_type in ops[2]
 
-    println("D type: $d_elem_type")
-
     a_elem_type = b_elem_type
 
     
@@ -295,12 +288,10 @@ for ops in all_wmma_ops,
     # Name of the LLVM intrinsic
     # If integer A/B types, name is determined by A/B types
     if d_elem_type == "s32"
-        println("Integer wmma")
         llvm_intr = "llvm.nvvm.wmma.$shape.mma.$a_layout.$b_layout.$a_elem_type"
         # Name of the Julia wrapper function
         func_name = Symbol(join(filter(!isempty, ["llvm", "wmma", "mma", a_layout, b_layout, shape, a_elem_type]), "_"))
     else # Name defined by D/C types
-        println("Float wmma")
         llvm_intr = "llvm.nvvm.wmma.$shape.mma.$a_layout.$b_layout.$d_elem_type.$c_elem_type"
         # Name of the Julia wrapper function
         func_name = Symbol(join(filter(!isempty, ["llvm", "wmma", "mma", a_layout, b_layout, shape, d_elem_type, c_elem_type]), "_"))
