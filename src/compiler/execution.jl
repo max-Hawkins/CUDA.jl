@@ -123,8 +123,14 @@ Adapt.adapt_storage(to::Adaptor, p::CuPtr{T}) where {T} = reinterpret(LLVMPtr{T,
 struct CuRefValue{T} <: Ref{T}
   x::T
 end
-Base.getindex(r::CuRefValue) = r.x
+Base.getindex(r::CuRefValue{T}) where T = r.x
 Adapt.adapt_structure(to::Adaptor, r::Base.RefValue) = CuRefValue(adapt(to, r[]))
+
+# broadcast sometimes passes a ref(type), resulting in a GPU-incompatible DataType box.
+# avoid that by using a special kind of ref that knows about the boxed type.
+struct CuRefType{T} <: Ref{DataType} end
+Base.getindex(r::CuRefType{T}) where T = T
+Adapt.adapt_structure(to::Adaptor, r::Base.RefValue{<:Union{DataType,Type}}) = CuRefType{r[]}()
 
 Adapt.adapt_storage(::Adaptor, xs::CuArray{T,N}) where {T,N} =
   Base.unsafe_convert(CuDeviceArray{T,N,AS.Global}, xs)
@@ -279,10 +285,10 @@ in a hot path without degrading performance. New code will be generated automati
 when function changes, or when different types or keyword arguments are provided.
 """
 @timeit_ci function cufunction(f::F, tt::TT=Tuple{}; name=nothing, kwargs...) where {F,TT}
-    dev = device()
-    cache = cufunction_cache[dev]
+    cuda = active_state()
+    cache = cufunction_cache(cuda.context)
     source = FunctionSpec(f, tt, true, name)
-    target = CUDACompilerTarget(dev; kwargs...)
+    target = CUDACompilerTarget(cuda.device; kwargs...)
     params = CUDACompilerParams()
     job = CompilerJob(target, source, params)
     return GPUCompiler.cached_compilation(cache, job,
@@ -291,7 +297,8 @@ when function changes, or when different types or keyword arguments are provided
 end
 
 # XXX: does this need a lock? we'll only write to it when we have the typeinf lock.
-const cufunction_cache = PerDevice{Dict{UInt, Any}}() do dev
+const _cufunction_cache = Dict{CuContext, Dict{UInt, Any}}();
+cufunction_cache(ctx::CuContext) = get!(_cufunction_cache, ctx) do
     Dict{UInt, Any}()
 end
 
@@ -422,6 +429,7 @@ end
         elseif !isempty(log)
             @debug "PTX linker info log:\n" * log
         end
+        rm(ptxas_output)
 
         image = read(nvlink_output)
         rm(nvlink_output)

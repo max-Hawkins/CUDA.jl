@@ -23,16 +23,30 @@ import Adapt
   @test_throws ArgumentError Base.unsafe_convert(Ptr{Float32}, xs)
 
   # unsafe_wrap
-  @test Base.unsafe_wrap(CuArray, CU_NULL, 1; own=false).state == CUDA.ARRAY_UNMANAGED
-  ## compare structs without using mapreduce
-  structeq(a,b) = false
-  structeq(a::T,b::T) where T = all(field->getfield(a,field) == getfield(b,field), fieldnames(T))
-  @test structeq(Base.unsafe_wrap(CuArray, CU_NULL, 2),                CuArray{Nothing,1}(CU_NULL, (2,)))
-  @test structeq(Base.unsafe_wrap(CuArray{Nothing}, CU_NULL, 2),       CuArray{Nothing,1}(CU_NULL, (2,)))
-  @test structeq(Base.unsafe_wrap(CuArray{Nothing,1}, CU_NULL, 2),     CuArray{Nothing,1}(CU_NULL, (2,)))
-  @test structeq(Base.unsafe_wrap(CuArray, CU_NULL, (1,2)),            CuArray{Nothing,2}(CU_NULL, (1,2)))
-  @test structeq(Base.unsafe_wrap(CuArray{Nothing}, CU_NULL, (1,2)),   CuArray{Nothing,2}(CU_NULL, (1,2)))
-  @test structeq(Base.unsafe_wrap(CuArray{Nothing,2}, CU_NULL, (1,2)), CuArray{Nothing,2}(CU_NULL, (1,2)))
+  let
+    data = CuArray{Int}(undef, 2)
+    ptr = pointer(data)
+
+    @test Base.unsafe_wrap(CuArray, ptr, 1; own=false).storage.refcount[] == -1
+
+    ## compare the fields we care about: the buffer, size, offset, and context
+    function test_eq(a, b)
+      @test eltype(a) == eltype(b)
+      @test ndims(a) == ndims(b)
+      @test a.storage.buffer.ptr == b.storage.buffer.ptr
+      @test a.storage.ctx == b.storage.ctx
+      @test a.maxsize == b.maxsize
+      @test a.offset == b.offset
+      @test a.dims == b.dims
+    end
+
+    test_eq(Base.unsafe_wrap(CuArray, ptr, 2),              CuArray{Int,1}(data.storage, (2,)))
+    test_eq(Base.unsafe_wrap(CuArray{Int}, ptr, 2),         CuArray{Int,1}(data.storage, (2,)))
+    test_eq(Base.unsafe_wrap(CuArray{Int,1}, ptr, 2),       CuArray{Int,1}(data.storage, (2,)))
+    test_eq(Base.unsafe_wrap(CuArray, ptr, (1,2)),          CuArray{Int,2}(data.storage, (1,2)))
+    test_eq(Base.unsafe_wrap(CuArray{Int}, ptr, (1,2)),     CuArray{Int,2}(data.storage, (1,2)))
+    test_eq(Base.unsafe_wrap(CuArray{Int,2}, ptr, (1,2)),   CuArray{Int,2}(data.storage, (1,2)))
+  end
 
   @test collect(CUDA.zeros(2, 2)) == zeros(Float32, 2, 2)
   @test collect(CUDA.ones(2, 2)) == ones(Float32, 2, 2)
@@ -545,5 +559,124 @@ end
     end
     @cuda threads=length(b) kernel(b)
     @test Array(b) == [2, nothing, 4]
+  end
+end
+
+@testset "large map reduce" begin
+  dev = device()
+
+  big_size = CUDA.big_mapreduce_threshold(dev) + 5
+  a = rand(Float32, big_size, 31)
+  c = CuArray(a)
+
+  expected = minimum(a, dims=2)
+  actual = minimum(c, dims=2)
+  @test expected == Array(actual)
+
+  expected = findmax(a, dims=2)
+  actual = findmax(c, dims=2)
+  @test expected == map(Array, actual)
+
+  expected = sum(a, dims=2)
+  actual = sum(c, dims=2)
+  @test expected == Array(actual)
+
+  a = rand(Int, big_size, 31)
+  c = CuArray(a)
+
+  expected = minimum(a, dims=2)
+  actual = minimum(c, dims=2)
+  @test expected == Array(actual)
+
+  expected = findmax(a, dims=2)
+  actual = findmax(c, dims=2)
+  @test expected == map(Array, actual)
+
+  expected = sum(a, dims=2)
+  actual = sum(c, dims=2)
+  @test expected == Array(actual)
+end
+
+@testset "unified memory" begin
+  dev = device()
+
+  let
+    a = CuVector{Int}(undef, 1)
+    @test !is_unified(a)
+    @test !is_managed(pointer(a))
+  end
+
+  let
+    a = CuVector{Int,Mem.UnifiedBuffer}(undef, 1)
+    @test is_unified(a)
+    @test is_managed(pointer(a))
+    a .= 0
+    @test Array(a) == [0]
+
+    if length(devices()) > 1
+      other_devs = filter(!isequal(dev), collect(devices()))
+      device!(first(other_devs)) do
+        a .+= 1
+        @test Array(a) == [1]
+      end
+      @test Array(a) == [1]
+    end
+  end
+
+  let
+    # default ctor: device memory
+    let a = CUDA.rand(1)
+      @test !is_unified(a)
+      @test !is_managed(pointer(a))
+    end
+
+    for B = [Mem.DeviceBuffer, Mem.UnifiedBuffer]
+      a = CuVector{Float32,B}(rand(Float32, 1))
+      @test !xor(B == Mem.UnifiedBuffer, is_unified(a))
+
+      # check that buffer types are preserved
+      let b = similar(a)
+        @test eltype(b) == eltype(a)
+        @test !xor(B == Mem.UnifiedBuffer, is_unified(b))
+      end
+      let b = CuArray(a)
+        @test eltype(b) == eltype(a)
+        @test !xor(B == Mem.UnifiedBuffer, is_unified(b))
+      end
+      let b = CuArray{Float64}(a)
+        @test eltype(b) == Float64
+        @test !xor(B == Mem.UnifiedBuffer, is_unified(b))
+      end
+
+      # change buffer type
+      let b = CuVector{Float32,Mem.DeviceBuffer}(a)
+        @test eltype(b) == eltype(a)
+        @test !is_unified(b)
+      end
+      let b = CuVector{Float32,Mem.UnifiedBuffer}(a)
+        @test eltype(b) == eltype(a)
+        @test is_unified(b)
+      end
+
+      # change type and buffer type
+      let b = CuVector{Float64,Mem.DeviceBuffer}(a)
+        @test eltype(b) == Float64
+        @test !is_unified(b)
+      end
+      let b = CuVector{Float64,Mem.UnifiedBuffer}(a)
+        @test eltype(b) == Float64
+        @test is_unified(b)
+      end
+    end
+
+    # cu: supports unified keyword
+    let a = cu(rand(Float64, 1); unified=true)
+      @test is_unified(a)
+      @test eltype(a) == Float32
+    end
+    let a = cu(rand(Float64, 1))
+      @test !is_unified(a)
+      @test eltype(a) == Float32
+    end
   end
 end

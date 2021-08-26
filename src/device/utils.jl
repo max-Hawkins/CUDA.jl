@@ -8,16 +8,16 @@ const method_table = nothing
 end
 
 # list of overrides (only for Julia 1.6)
-const overrides = quote end
+const overrides = Expr[]
 
 macro device_override(ex)
     code = quote
-        $GPUCompiler.@override($method_table, $ex)
+        $GPUCompiler.@override(CUDA.method_table, $ex)
     end
     if isdefined(Base.Experimental, Symbol("@overlay"))
         return esc(code)
     else
-        push!(overrides.args, code)
+        push!(overrides, code)
         return
     end
 end
@@ -35,4 +35,28 @@ macro device_function(ex)
         $(combinedef(def))
         @device_override $ex
     end)
+end
+
+macro device_functions(ex)
+    ex = macroexpand(__module__, ex)
+
+    # recursively prepend `@device_function` to all function definitions
+    function rewrite(block)
+        out = Expr(:block)
+        for arg in block.args
+            if Meta.isexpr(arg, :block)
+                # descend in blocks
+                push!(out.args, rewrite(arg))
+            elseif Meta.isexpr(arg, [:function, :(=)])
+                # rewrite function definitions
+                push!(out.args, :(@device_function $arg))
+            else
+                # preserve all the rest
+                push!(out.args, arg)
+            end
+        end
+        out
+    end
+
+    esc(rewrite(ex))
 end

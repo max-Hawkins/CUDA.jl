@@ -10,6 +10,14 @@ end
 
 function mm_wrapper(transa::SparseChar, transb::SparseChar, alpha::Number,
                     A::CuSparseMatrix{T}, B::CuMatrix{T}, beta::Number, C::CuMatrix{T}) where {T}
+    n_A, m_A = (transa != 'N') ? reverse(size(A)) : size(A)
+    n_B, m_B = (transb != 'N') ? reverse(size(B)) : size(B)
+    n_C, m_C = size(C)
+    m_A == n_B || throw(DimensionMismatch())
+    n_A == n_C || throw(DimensionMismatch())
+    m_B == m_C || throw(DimensionMismatch())
+    isempty(B) && return CUDA.zeros(eltype(B), size(A, 1), 0)
+
     if version() <= v"10.3.1"
         # Generic mm! doesn't support transposed B on CUDA10
         return mm2!(transa, transb, alpha, A, B, beta, C, 'O')

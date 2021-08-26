@@ -2,8 +2,6 @@
 
 using Base: FastMath
 
-using SpecialFunctions
-
 
 ## helpers
 
@@ -29,6 +27,32 @@ within(lower, upper) = (val) -> lower <= val <= upper
 @device_override Base.tan(x::Float64) = ccall("extern __nv_tan", llvmcall, Cdouble, (Cdouble,), x)
 @device_override Base.tan(x::Float32) = ccall("extern __nv_tanf", llvmcall, Cfloat, (Cfloat,), x)
 @device_override FastMath.tan_fast(x::Float32) = ccall("extern __nv_fast_tanf", llvmcall, Cfloat, (Cfloat,), x)
+
+@device_override function Base.sincos(x::Float64)
+    s = Ref{Cdouble}()
+    c = Ref{Cdouble}()
+    ccall("extern __nv_sincos", llvmcall, Cvoid, (Cdouble, Ptr{Cdouble}, Ptr{Cdouble}), x, s, c)
+    return (s[], c[])
+end
+@device_override function Base.sincos(x::Float32)
+    s = Ref{Cfloat}()
+    c = Ref{Cfloat}()
+    ccall("extern __nv_sincosf", llvmcall, Cvoid, (Cfloat, Ptr{Cfloat}, Ptr{Cfloat}), x, s, c)
+    return (s[], c[])
+end
+
+@device_override function Base.sincospi(x::Float64)
+    s = Ref{Cdouble}()
+    c = Ref{Cdouble}()
+    ccall("extern __nv_sincospi", llvmcall, Cvoid, (Cdouble, Ptr{Cdouble}, Ptr{Cdouble}), x, s, c)
+    return (s[], c[])
+end
+@device_override function Base.sincospi(x::Float32)
+    s = Ref{Cfloat}()
+    c = Ref{Cfloat}()
+    ccall("extern __nv_sincospif", llvmcall, Cvoid, (Cfloat, Ptr{Cfloat}, Ptr{Cfloat}), x, s, c)
+    return (s[], c[])
+end
 
 
 ## inverse trigonometric
@@ -118,23 +142,6 @@ within(lower, upper) = (val) -> lower <= val <= upper
 @device_override Base.ldexp(x::Float64, y::Int32) = ccall("extern __nv_ldexp", llvmcall, Cdouble, (Cdouble, Int32), x, y)
 @device_override Base.ldexp(x::Float32, y::Int32) = ccall("extern __nv_ldexpf", llvmcall, Cfloat, (Cfloat, Int32), x, y)
 
-## error
-
-@device_override SpecialFunctions.erf(x::Float64) = ccall("extern __nv_erf", llvmcall, Cdouble, (Cdouble,), x)
-@device_override SpecialFunctions.erf(x::Float32) = ccall("extern __nv_erff", llvmcall, Cfloat, (Cfloat,), x)
-
-@device_override SpecialFunctions.erfinv(x::Float64) = ccall("extern __nv_erfinv", llvmcall, Cdouble, (Cdouble,), x)
-@device_override SpecialFunctions.erfinv(x::Float32) = ccall("extern __nv_erfinvf", llvmcall, Cfloat, (Cfloat,), x)
-
-@device_override SpecialFunctions.erfc(x::Float64) = ccall("extern __nv_erfc", llvmcall, Cdouble, (Cdouble,), x)
-@device_override SpecialFunctions.erfc(x::Float32) = ccall("extern __nv_erfcf", llvmcall, Cfloat, (Cfloat,), x)
-
-@device_override SpecialFunctions.erfcinv(x::Float64) = ccall("extern __nv_erfcinv", llvmcall, Cdouble, (Cdouble,), x)
-@device_override SpecialFunctions.erfcinv(x::Float32) = ccall("extern __nv_erfcinvf", llvmcall, Cfloat, (Cfloat,), x)
-
-@device_override SpecialFunctions.erfcx(x::Float64) = ccall("extern __nv_erfcx", llvmcall, Cdouble, (Cdouble,), x)
-@device_override SpecialFunctions.erfcx(x::Float32) = ccall("extern __nv_erfcxf", llvmcall, Cfloat, (Cfloat,), x)
-
 
 ## integer handling (bit twiddling)
 
@@ -220,8 +227,22 @@ within(lower, upper) = (val) -> lower <= val <= upper
 @device_override FastMath.pow_fast(x::Float32, y::Float32) = ccall("extern __nv_fast_powf", llvmcall, Cfloat, (Cfloat, Cfloat), x, y)
 @device_override Base.:(^)(x::Float64, y::Int32) = ccall("extern __nv_powi", llvmcall, Cdouble, (Cdouble, Int32), x, y)
 @device_override Base.:(^)(x::Float32, y::Int32) = ccall("extern __nv_powif", llvmcall, Cfloat, (Cfloat, Int32), x, y)
-@device_override Base.:(^)(x::Float64, y::Int64) = x ^ Float64(y)
-@device_override Base.:(^)(x::Float32, y::Int64) = x ^ Float32(y)
+@device_override @inline function Base.:(^)(x::Float32, y::Int64)
+    y == -1 && return inv(x)
+    y == 0 && return one(x)
+    y == 1 && return x
+    y == 2 && return x*x
+    y == 3 && return x*x*x
+    x ^ Float32(y)
+end
+@device_override @inline function Base.:(^)(x::Float64, y::Int64)
+    y == -1 && return inv(x)
+    y == 0 && return one(x)
+    y == 1 && return x
+    y == 2 && return x*x
+    y == 3 && return x*x*x
+    x ^ Float64(y)
+end
 
 ## rounding and selection
 
@@ -265,45 +286,15 @@ within(lower, upper) = (val) -> lower <= val <= upper
 
 ## division and remainder
 
-# NOTE: CUDA follows fmod, which behaves differently than Base.mod for negative numbers
-#@device_override Base.mod(x::Float64, y::Float64) = ccall("extern __nv_fmod", llvmcall, Cdouble, (Cdouble, Cdouble), x, y)
-#@device_override Base.mod(x::Float32, y::Float32) = ccall("extern __nv_fmodf", llvmcall, Cfloat, (Cfloat, Cfloat), x, y)
-
-@device_override Base.rem(x::Float64, y::Float64) = ccall("extern __nv_remainder", llvmcall, Cdouble, (Cdouble, Cdouble), x, y)
-@device_override Base.rem(x::Float32, y::Float32) = ccall("extern __nv_remainderf", llvmcall, Cfloat, (Cfloat, Cfloat), x, y)
+@device_override Base.rem(x::Float64, y::Float64) = ccall("extern __nv_fmod", llvmcall, Cdouble, (Cdouble, Cdouble), x, y)
+@device_override Base.rem(x::Float32, y::Float32) = ccall("extern __nv_fmodf", llvmcall, Cfloat, (Cfloat, Cfloat), x, y)
 @device_override Base.rem(x::Float16, y::Float16) = Float16(rem(Float32(x), Float32(y)))
 
+@device_override Base.rem(x::Float64, y::Float64, ::RoundingMode{:Nearest}) = ccall("extern __nv_remainder", llvmcall, Cdouble, (Cdouble, Cdouble), x, y)
+@device_override Base.rem(x::Float32, y::Float32, ::RoundingMode{:Nearest}) = ccall("extern __nv_remainderf", llvmcall, Cfloat, (Cfloat, Cfloat), x, y)
+@device_override Base.rem(x::Float16, y::Float16, ::RoundingMode{:Nearest}) = Float16(rem(Float32(x), Float32(y), RoundNearest))
+
 @device_override FastMath.div_fast(x::Float32, y::Float32) = ccall("extern __nv_fast_fdividef", llvmcall, Cfloat, (Cfloat, Cfloat), x, y)
-
-
-## gamma function
-
-@device_override SpecialFunctions.lgamma(x::Float64) = ccall("extern __nv_lgamma", llvmcall, Cdouble, (Cdouble,), x)
-@device_override SpecialFunctions.lgamma(x::Float32) = ccall("extern __nv_lgammaf", llvmcall, Cfloat, (Cfloat,), x)
-
-@device_function tgamma(x::Float64) = ccall("extern __nv_tgamma", llvmcall, Cdouble, (Cdouble,), x)
-@device_function tgamma(x::Float32) = ccall("extern __nv_tgammaf", llvmcall, Cfloat, (Cfloat,), x)
-
-
-## Bessel
-
-@device_override SpecialFunctions.besselj0(x::Float64) = ccall("extern __nv_j0", llvmcall, Cdouble, (Cdouble,), x)
-@device_override SpecialFunctions.besselj0(x::Float32) = ccall("extern __nv_j0f", llvmcall, Cfloat, (Cfloat,), x)
-
-@device_override SpecialFunctions.besselj1(x::Float64) = ccall("extern __nv_j1", llvmcall, Cdouble, (Cdouble,), x)
-@device_override SpecialFunctions.besselj1(x::Float32) = ccall("extern __nv_j1f", llvmcall, Cfloat, (Cfloat,), x)
-
-@device_override SpecialFunctions.besselj(n::Int32, x::Float64) = ccall("extern __nv_jn", llvmcall, Cdouble, (Int32, Cdouble), n, x)
-@device_override SpecialFunctions.besselj(n::Int32, x::Float32) = ccall("extern __nv_jnf", llvmcall, Cfloat, (Int32, Cfloat), n, x)
-
-@device_override SpecialFunctions.bessely0(x::Float64) = ccall("extern __nv_y0", llvmcall, Cdouble, (Cdouble,), x)
-@device_override SpecialFunctions.bessely0(x::Float32) = ccall("extern __nv_y0f", llvmcall, Cfloat, (Cfloat,), x)
-
-@device_override SpecialFunctions.bessely1(x::Float64) = ccall("extern __nv_y1", llvmcall, Cdouble, (Cdouble,), x)
-@device_override SpecialFunctions.bessely1(x::Float32) = ccall("extern __nv_y1f", llvmcall, Cfloat, (Cfloat,), x)
-
-@device_override SpecialFunctions.bessely(n::Int32, x::Float64) = ccall("extern __nv_yn", llvmcall, Cdouble, (Int32, Cdouble), n, x)
-@device_override SpecialFunctions.bessely(n::Int32, x::Float32) = ccall("extern __nv_ynf", llvmcall, Cfloat, (Int32, Cfloat), n, x)
 
 
 ## distributions

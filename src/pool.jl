@@ -2,76 +2,89 @@
 
 using Printf
 using Logging
-using DataStructures
-
-include("pool/utils.jl")
-using .PoolUtils
-
-# TODO: simple/binned/split allocators ignore stream arguments; is that safe?
-#       should we bother fixing this (on CUDA 11.2 we have a stream-ordered allocator)?
 
 
 ## allocation statistics
 
 mutable struct AllocStats
-  # pool allocation requests
-  pool_nalloc::Int
-  pool_nfree::Int
-  ## in bytes
-  pool_alloc::Int
+  alloc_count::Int
+  alloc_bytes::Int
 
-  # actual CUDA allocations
-  actual_nalloc::Int
-  actual_nfree::Int
-  ## in bytes
-  actual_alloc::Int
-  actual_free::Int
+  free_count::Int
+  free_bytes::Int
 
-  pool_time::Float64
-  actual_time::Float64
+  total_time::Float64
 end
 
-const alloc_stats = AllocStats(0, 0, 0, 0, 0, 0, 0, 0, 0)
+const alloc_stats = AllocStats(0, 0, 0, 0, 0.0)
 
 Base.copy(alloc_stats::AllocStats) =
   AllocStats((getfield(alloc_stats, field) for field in fieldnames(AllocStats))...)
 
 AllocStats(b::AllocStats, a::AllocStats) =
   AllocStats(
-    b.pool_nalloc - a.pool_nalloc,
-    b.pool_nfree - a.pool_nfree,
-    b.pool_alloc - a.pool_alloc,
-    b.actual_nalloc - a.actual_nalloc,
-    b.actual_nfree - a.actual_nfree,
-    b.actual_alloc - a.actual_alloc,
-    b.actual_free - a.actual_free,
-    b.pool_time - a.pool_time,
-    b.actual_time - a.actual_time)
+    b.alloc_count - a.alloc_count,
+    b.alloc_bytes - a.alloc_bytes,
+    b.free_count - a.free_count,
+    b.free_bytes - a.free_bytes,
+    b.total_time - a.total_time)
 
 
 ## CUDA allocator
 
-const usage = PerDevice{Threads.Atomic{Int}}() do dev
-  Threads.Atomic{Int}(0)
+@timeit_ci function actual_alloc(bytes::Integer; async::Bool=false,
+                                 stream::Union{CuStream,Nothing}=nothing)
+  # try the actual allocation
+  buf = try
+    time = Base.@elapsed begin
+      buf = @timeit_ci "Mem.alloc" begin
+        Mem.alloc(Mem.Device, bytes; async, stream)
+      end
+    end
+
+    buf
+  catch err
+    isa(err, OutOfGPUMemoryError) || rethrow()
+    return nothing
+  end
+
+  return buf
 end
 
-# ignore the available memory heuristic, and even allow to eat in to the reserve
-const usage_hard_limit = PerDevice{Int}() do dev
-  getenv("JULIA_CUDA_MEMORY_LIMIT", typemax(Int))
+@timeit_ci function actual_free(buf::Mem.DeviceBuffer;
+                                stream::Union{CuStream,Nothing}=nothing)
+  # free the memory
+  time = Base.@elapsed begin
+    @timeit_ci "Mem.free" Mem.free(buf; stream)
+  end
+
+  return
 end
 
-# This limit depends on the actually available memory, which might be an underestimation
-# (e.g. when the GPU was in use initially). The hard limit does not rely on such heuristics.
-const usage_soft_limit = PerDevice{Int}() do dev
-  available = allocatable_memory(dev)
-  reserve = reserved_memory(dev)
-  return available - reserve
+
+## stream-ordered memory pool
+
+const __stream_ordered = LazyInitialized{Vector{Bool}}()
+function stream_ordered(dev::CuDevice)
+  flags = get!(__stream_ordered) do
+    val = Vector{Bool}(undef, ndevices())
+    if version() < v"11.2" || haskey(ENV, "CUDA_MEMCHECK") ||
+       get(ENV, "JULIA_CUDA_MEMORY_POOL", "cuda") == "none"
+      fill!(val, false)
+    else
+      for dev in devices()
+        val[deviceid(dev)+1] = attribute(dev, DEVICE_ATTRIBUTE_MEMORY_POOLS_SUPPORTED) == 1
+      end
+    end
+    val
+  end
+  @inbounds flags[deviceid(dev)+1]
 end
 
 function allocatable_memory(dev::CuDevice)
   # NOTE: this function queries available memory, which obviously changes after we allocate.
   device!(dev) do
-    Base.min(available_memory(), usage_hard_limit[dev])
+    available_memory()
   end
 end
 
@@ -98,126 +111,64 @@ function reserved_memory(dev::CuDevice)
   end
 end
 
-@timeit_ci function actual_alloc(bytes::Integer, last_resort::Bool=false;
-                                 stream_ordered::Bool=false,
-                                 stream::Union{CuStream,Nothing}=nothing)
-  dev = device()
-
-  # check the memory allocation limit
-  if usage[dev][] + bytes > (last_resort ? usage_hard_limit[dev] : usage_soft_limit[dev])
-    return nothing
-  end
-
-  # try the actual allocation
-  buf = try
-    time = Base.@elapsed begin
-      buf = @timeit_ci "Mem.alloc" begin
-        Mem.alloc(Mem.Device, bytes; async=true, stream_ordered, stream)
-      end
-    end
-
-    Threads.atomic_add!(usage[dev], bytes)
-    alloc_stats.actual_time += time
-    alloc_stats.actual_nalloc += 1
-    alloc_stats.actual_alloc += bytes
-
-    buf
-  catch err
-    isa(err, OutOfGPUMemoryError) || rethrow()
-    return nothing
-  end
-
-  return Block(buf, bytes; state=AVAILABLE)
+# per-device flag indicating the status of a pool
+const _pool_status = PerDevice{Base.RefValue{Union{Nothing,Bool}}}()
+pool_status(dev::CuDevice) = get!(_pool_status, dev) do
+  # nothing=uninitialized, false=idle, true=active
+  Ref{Union{Nothing,Bool}}(nothing)
 end
+function pool_mark(dev::CuDevice)
+  status = pool_status(dev)
+  if status[] === nothing
+      pool = memory_pool(dev)
 
-@timeit_ci function actual_free(block::Block; stream_ordered::Bool=false,
-                                      stream::Union{CuStream,Nothing}=nothing)
-  dev = device()
+      # first time on this context, so configure the pool
+      attribute!(memory_pool(dev), MEMPOOL_ATTR_RELEASE_THRESHOLD,
+                 UInt64(reserved_memory(dev)))
 
-  @assert iswhole(block) "Cannot free $block: block is not whole"
-  @assert block.off == 0
-  @assert block.state == AVAILABLE "Cannot free $block: block is not available"
-
-  # free the memory
-  time = Base.@elapsed begin
-    @timeit_ci "Mem.free" Mem.free(block.buf; async=true, stream_ordered, stream)
+      # also launch a task to periodically trim the pool
+      if isinteractive() && !isassigned(__pool_cleanup)
+        __pool_cleanup[] = @async pool_cleanup()
+      end
   end
-  block.state = INVALID
-
-  Threads.atomic_sub!(usage[dev], sizeof(block.buf))
-  alloc_stats.actual_time += time
-  alloc_stats.actual_nfree += 1
-  alloc_stats.actual_free += sizeof(block.buf)
-
+  status[] = true
   return
 end
 
+# reclaim unused pool memory after a certain time
+const __pool_cleanup = Ref{Task}()
+function pool_cleanup()
+  idle_counters = Base.fill(0, ndevices())
+  while true
+    for (i, dev) in enumerate(devices())
+      stream_ordered(dev) || continue
 
-## memory pools
+      status = pool_status(dev)
+      status[] === nothing && continue
 
-# pool API:
-# - constructor taking a CuDevice
-# - alloc(::AbstractPool, sz)::Block
-# - free(::AbstractPool, ::Block)
-# - reclaim(::AbstractPool, nb::Int=typemax(Int))::Int
-# - cached_memory(::AbstractPool)
+      if status[]
+        idle_counters[i] = 0
+      else
+        idle_counters[i] += 1
+      end
+      status[] = 0
 
-module Pool
-@enum MemoryPool None Simple Binned Split
-end
+      if idle_counters[i] == 5
+        # the pool hasn't been used for a while, so reclaim unused buffers
+        device!(dev) do
+          reclaim()
+        end
+      end
+    end
 
-abstract type AbstractPool end
-include("pool/none.jl")
-include("pool/simple.jl")
-include("pool/binned.jl")
-include("pool/split.jl")
-
-const pools = PerDevice{AbstractPool}() do dev
-  default_pool = if Mem.has_stream_ordered(dev)
-      "cuda"
-  else
-      "binned"
+    sleep(60)
   end
-
-  pool_name = get(ENV, "JULIA_CUDA_MEMORY_POOL", default_pool)
-  pool = if pool_name == "none"
-      NoPool(; device=dev, stream_ordered=false)
-  elseif pool_name == "simple"
-      SimplePool(; device=dev, stream_ordered=false)
-  elseif pool_name == "binned"
-      BinnedPool(; device=dev, stream_ordered=false)
-  elseif pool_name == "split"
-      SplitPool(; device=dev, stream_ordered=false)
-  elseif pool_name == "cuda"
-      @assert Mem.has_stream_ordered(dev) "The CUDA memory pool is not compatible with your set-up"
-      attribute!(memory_pool(dev), MEMPOOL_ATTR_RELEASE_THRESHOLD,
-                 UInt64(reserved_memory(dev)))
-      NoPool(; device=dev, stream_ordered=true)
-  else
-      error("Invalid memory pool '$pool_name'")
-  end
-
-  if isinteractive() && !isassigned(__pool_cleanup)
-    __pool_cleanup[] = @async pool_cleanup()
-  end
-
-  pool
 end
 
 
 ## interface
 
 export OutOfGPUMemoryError
-
-const allocated_lock = NonReentrantLock()
-const allocated = PerDevice{Dict{CuPtr,Tuple{Block,Int}}}() do dev
-    Dict{CuPtr,Tuple{Block,Int}}()
-end
-
-const requested_lock = NonReentrantLock()
-const requested = PerDevice{Dict{CuPtr{Nothing},Vector}}() do dev
-  Dict{CuPtr{Nothing},Vector}()
-end
 
 """
     OutOfGPUMemoryError()
@@ -241,128 +192,115 @@ function Base.showerror(io::IO, err::OutOfGPUMemoryError)
 end
 
 """
-    alloc(sz)
+    alloc([::BufferType], sz; [stream::CuStream])
 
-Allocate a number of bytes `sz` from the memory pool. Returns a `CuPtr{Nothing}`; may throw
-a [`OutOfGPUMemoryError`](@ref) if the allocation request cannot be satisfied.
+Allocate a number of bytes `sz` from the memory pool. Returns a buffer object; may throw
+an [`OutOfGPUMemoryError`](@ref) if the allocation request cannot be satisfied.
 """
-@inline @timeit_ci function alloc(sz; stream::CuStream=stream())
+@inline @timeit_ci alloc(sz::Integer; kwargs...) = alloc(Mem.DeviceBuffer, sz; kwargs...)
+@inline @timeit_ci function alloc(::Type{B}, sz; stream::Union{Nothing,CuStream}=nothing) where {B<:Mem.AbstractBuffer}
   # 0-byte allocations shouldn't hit the pool
-  sz == 0 && return CU_NULL
+  sz == 0 && return B()
 
-  dev = device()
-  pool = pools[dev]
+  # _alloc reports its own time measurement, since it may spend time in garbage collection
+  # (and using Base.@timed/gc_num to exclude that time is too expensive)
+  buf, time = _alloc(B, sz; stream)
 
-  time = Base.@elapsed begin
-    block = @timeit_ci "pool" alloc(pool, sz; stream)::Union{Nothing,Block}
-  end
-  block === nothing && throw(OutOfGPUMemoryError(sz))
+  alloc_stats.alloc_count += 1
+  alloc_stats.alloc_bytes += sz
+  alloc_stats.total_time += time
+  # NOTE: total_time might be an over-estimation if we trigger GC somewhere else
 
-  # record the memory block
-  ptr = pointer(block)
-  @lock allocated_lock begin
-      @assert !haskey(allocated[dev], ptr)
-      allocated[dev][ptr] = block, 1
-  end
+  return buf
+end
+@inline function _alloc(::Type{Mem.DeviceBuffer}, sz; stream::Union{Nothing,CuStream})
+    state = active_state()
 
-  # record the allocation site
-  if Base.JLOptions().debug_level >= 2
-    bt = backtrace()
-    @lock requested_lock begin
-      @assert !haskey(requested[dev], ptr)
-      requested[dev][ptr] = bt
+    gctime = 0.0
+    time = Base.@elapsed begin
+      buf = nothing
+      if stream_ordered(state.device)
+        # mark the pool as active
+        pool_mark(state.device)
+
+        for phase in 1:4
+            if phase == 2
+                gctime += Base.@elapsed GC.gc(false)
+            elseif phase == 3
+                gctime += Base.@elapsed GC.gc(true)
+            elseif phase == 4
+                device_synchronize()
+            end
+
+            buf = actual_alloc(sz; async=true, stream=something(stream, state.stream))
+            buf === nothing || break
+        end
+      else
+        for phase in 1:4
+            if phase == 2
+                gctime += Base.@elapsed GC.gc(false)
+            elseif phase == 3
+                gctime += Base.@elapsed GC.gc(true)
+            end
+
+            buf = actual_alloc(sz; async=false)
+            buf === nothing || break
+        end
+      end
+      buf === nothing && throw(OutOfGPUMemoryError(sz))
     end
+
+    buf, time - gctime
+end
+@inline function _alloc(::Type{Mem.UnifiedBuffer}, sz; stream::Union{Nothing,CuStream})
+  time = Base.@elapsed begin
+    buf = Mem.alloc(Mem.Unified, sz)
   end
-
-  alloc_stats.pool_time += time
-  alloc_stats.pool_nalloc += 1
-  alloc_stats.pool_alloc += sz
-
-  if MEMDEBUG && ptr == CuPtr{Cvoid}(0xbbbbbbbbbbbbbbbb)
-    error("Allocated a scrubbed pointer")
-  end
-
-  return ptr
+  buf, time
 end
 
 """
-    alias(ptr)
+    free(buf)
 
-Increase the reference count of a buffer pointed to by `ptr`. As a result, it will require
-multiple calls to `free` before this buffer is put back into the memory pool.
+Releases a buffer `buf` to the memory pool.
 """
-@inline function alias(ptr::CuPtr{Nothing})
-  # 0-byte allocations shouldn't hit the pool
-  ptr == CU_NULL && return
-
-  dev = device()
-
-  # look up the memory block
-  @spinlock allocated_lock begin
-    block, refcount = allocated[dev][ptr]
-    allocated[dev][ptr] = block, refcount+1
-  end
-
-  return
-end
-
-"""
-    free(ptr)
-
-Releases a buffer pointed to by `ptr` to the memory pool.
-"""
-@inline @timeit_ci function free(ptr::CuPtr{Nothing}; stream::CuStream=stream())
+@inline @timeit_ci function free(buf::Mem.AbstractBuffer;
+                                 stream::Union{Nothing,CuStream}=nothing)
   # XXX: have @timeit use the root timer, since we may be called from a finalizer
 
   # 0-byte allocations shouldn't hit the pool
-  ptr == CU_NULL && return
-
-  dev = device()
-  pool = pools[dev]
-  last_use[dev][] = time()
-
-  if MEMDEBUG && ptr == CuPtr{Cvoid}(0xbbbbbbbbbbbbbbbb)
-    Core.println("Freeing a scrubbed pointer!")
-  end
+  sizeof(buf) == 0 && return
 
   # this function is typically called from a finalizer, where we can't switch tasks,
   # so perform our own error handling.
   try
-    # look up the memory block, and bail out if its refcount isn't 1
-    block = @spinlock allocated_lock begin
-        block, refcount = allocated[dev][ptr]
-        if refcount == 1
-          delete!(allocated[dev], ptr)
-          block
-        else
-          # we can't actually free this block yet, so decrease its refcount and return
-          allocated[dev][ptr] = block, refcount-1
-          return
-        end
-    end
-
-    # look up the allocation site
-    if Base.JLOptions().debug_level >= 2
-      @lock requested_lock begin
-        @assert haskey(requested[dev], ptr)
-        delete!(requested[dev], ptr)
-      end
-    end
-
     time = Base.@elapsed begin
-      @timeit_ci "pool" free(pool, block; stream)
+      _free(buf; stream)
     end
 
-    alloc_stats.pool_time += time
-    alloc_stats.pool_nfree += 1
+    alloc_stats.free_count += 1
+    alloc_stats.free_bytes += sizeof(buf)
+    alloc_stats.total_time += time
   catch ex
-    Base.showerror_nostdio(ex, "WARNING: Error while freeing $ptr")
+    Base.showerror_nostdio(ex, "WARNING: Error while freeing $buf")
     Base.show_backtrace(Core.stdout, catch_backtrace())
     Core.println()
   end
 
   return
 end
+@inline function _free(buf::Mem.DeviceBuffer; stream::Union{Nothing,CuStream})
+    state = active_state()
+    if stream_ordered(state.device)
+      # mark the pool as active
+      pool_mark(state.device)
+
+      actual_free(buf; stream=something(stream, state.stream))
+    else
+      actual_free(buf)
+    end
+end
+@inline _free(buf::Mem.UnifiedBuffer; stream::Union{Nothing,CuStream}) = Mem.free(buf)
 
 """
     reclaim([sz=typemax(Int)])
@@ -373,8 +311,13 @@ actually reclaimed.
 """
 function reclaim(sz::Int=typemax(Int))
   dev = device()
-  pool = pools[dev]
-  reclaim(pool, sz)
+  if stream_ordered(dev)
+      # TODO: respect sz
+      device_synchronize()
+      trim(memory_pool(dev))
+  else
+    0
+  end
 end
 
 """
@@ -391,15 +334,14 @@ CUDA memory pool) and return a specific error code when failing to.
 macro retry_reclaim(isfailed, ex)
   quote
     ret = nothing
-    for phase in 1:5
+    phase = 0
+    while true
+      phase += 1
       ret = $(esc(ex))
       $(esc(isfailed))(ret) || break
 
-      dev = device()
-      pool = pools[dev]
-
       # incrementally more costly reclaim of cached memory
-      if pool.stream_ordered
+      if stream_ordered(device())
         if phase == 1
           # synchronizing streams forces asynchronous free operations to finish.
           device_synchronize()
@@ -413,17 +355,16 @@ macro retry_reclaim(isfailed, ex)
           # maybe this allocation doesn't use the pool, so trim it.
           reclaim()
           device_synchronize()
+        else
+          break
         end
       else
         if phase == 1
-          # our pools quickly fragment, so start by releasing its memory.
-          reclaim()
-        elseif phase == 2
           GC.gc(false)
-          reclaim()
-        elseif phase == 3
+        elseif phase == 2
           GC.gc(true)
-          reclaim()
+        else
+          break
         end
       end
     end
@@ -437,38 +378,10 @@ function retry_reclaim(f, check)
 end
 
 
-## management
-
-const last_use = PerDevice{Threads.Atomic{Float64}}() do dev
-  Threads.Atomic{Float64}(0.0)
-end
-
-# reclaim unused pool memory after a certain time
-function pool_cleanup()
-  while true
-    t1 = time()
-    for dev in keys(pools)
-      t0 = last_use[dev][]
-      t0 === 0.0 && continue
-
-      if t1-t0 > 300
-        # the pool hasn't been used for a while, so reclaim unused buffers
-        pool = pools[dev]
-        reclaim(pool)
-      end
-    end
-
-    sleep(60)
-  end
-end
-
-const __pool_cleanup = Ref{Task}()
-
-
 ## utilities
 
-used_memory(dev=device()) = @lock allocated_lock begin
-    mapreduce(sizeof∘first, +, values(allocated[dev]); init=0)
+used_memory(ctx=context()) = @lock allocated_lock begin
+    mapreduce(sizeof∘first, +, values(allocated(ctx)); init=0)
 end
 
 
@@ -483,9 +396,9 @@ macro allocated(ex)
         let
             local f
             function f()
-                b0 = alloc_stats.pool_alloc
+                b0 = alloc_stats.alloc_bytes
                 $(esc(ex))
-                alloc_stats.pool_alloc - b0
+                alloc_stats.alloc_bytes - b0
             end
             f()
         end
@@ -503,18 +416,16 @@ synchronized right before and after executing `ex` to exclude any external effec
 macro time(ex)
     quote
         local val, cpu_time,
-        cpu_alloc_size, cpu_gc_time, cpu_mem_stats,
-        gpu_alloc_size, gpu_gc_time, gpu_mem_stats = @timed $(esc(ex))
+            cpu_alloc_size, cpu_gc_time, cpu_mem_stats,
+            gpu_alloc_size, gpu_mem_time, gpu_mem_stats = @timed $(esc(ex))
 
         local cpu_alloc_count = Base.gc_alloc_count(cpu_mem_stats)
-        local gpu_alloc_count = gpu_mem_stats.pool_nalloc
-
-        local gpu_lib_time = gpu_mem_stats.actual_time
+        local gpu_alloc_count = gpu_mem_stats.alloc_count
 
         Printf.@printf("%10.6f seconds", cpu_time)
-        for (typ, gctime, libtime, bytes, allocs) in
+        for (typ, gctime, memtime, bytes, allocs) in
             (("CPU", cpu_gc_time, 0, cpu_alloc_size, cpu_alloc_count),
-             ("GPU", gpu_gc_time, gpu_lib_time, gpu_alloc_size, gpu_alloc_count))
+             ("GPU", 0, gpu_mem_time, gpu_alloc_size, gpu_alloc_count))
           if bytes != 0 || allocs != 0
               allocs, ma = Base.prettyprint_getunits(allocs, length(Base._cnt_units), Int64(1000))
               if ma == 1
@@ -525,13 +436,18 @@ macro time(ex)
               print(Base.format_bytes(bytes))
               if gctime > 0
                   Printf.@printf(", %.2f%% gc time", 100*gctime/cpu_time)
-                if libtime > 0
-                    Printf.@printf(" of which %.2f%% spent allocating", 100*libtime/gctime)
-                end
+              end
+              if memtime > 0
+                  Printf.@printf(", %.2f%% memmgmt time", 100*memtime/cpu_time)
               end
               print(")")
-          elseif gctime > 0
-              Printf.@printf(", %.2f%% %s gc time", 100*gctime/cpu_time, typ)
+          else
+              if gctime > 0
+                  Printf.@printf(", %.2f%% %s gc time", 100*gctime/cpu_time, typ)
+              end
+              if memtime > 0
+                  Printf.@printf(", %.2f%% %s memmgmt time", 100*memtime/cpu_time, typ)
+              end
           end
         end
         println()
@@ -568,13 +484,8 @@ macro timed(ex)
 
         (value=val, time=cpu_time,
          cpu_bytes=cpu_mem_stats.allocd, cpu_gctime=cpu_mem_stats.total_time / 1e9, cpu_gcstats=cpu_mem_stats,
-         gpu_bytes=gpu_mem_stats.pool_alloc, gpu_gctime=gpu_mem_stats.pool_time, gpu_gcstate=gpu_mem_stats)
+         gpu_bytes=gpu_mem_stats.alloc_bytes, gpu_memtime=gpu_mem_stats.total_time, gpu_memstats=gpu_mem_stats)
     end
-end
-
-function cached_memory(dev::CuDevice=device())
-  pool = pools[dev]
-  cached_memory(pool)
 end
 
 """
@@ -583,7 +494,8 @@ end
 Report to `io` on the memory status of the current GPU and the active memory pool.
 """
 function memory_status(io::IO=stdout)
-  dev = device()
+  state = active_state()
+  ctx = context()
 
   free_bytes, total_bytes = Mem.info()
   used_bytes = total_bytes - free_bytes
@@ -592,39 +504,34 @@ function memory_status(io::IO=stdout)
               100*used_ratio, Base.format_bytes(used_bytes),
               Base.format_bytes(total_bytes))
 
-  @printf(io, "CUDA allocator usage: %s", Base.format_bytes(usage[dev][]))
-  if usage_hard_limit[dev] !== typemax(Int)
-    @printf(io, " (capped at %s)", Base.format_bytes(usage_hard_limit[dev]))
-  end
-  println(io)
-
-  pool = pools[dev]
-  alloc_used_bytes = used_memory(dev)
-  alloc_cached_bytes = cached_memory(pool)
-  alloc_total_bytes = alloc_used_bytes + alloc_cached_bytes
-  @printf(io, "Memory pool usage: %s (%s allocated, %s cached)\n",
-              Base.format_bytes(alloc_total_bytes), Base.format_bytes(alloc_used_bytes),
-              Base.format_bytes(alloc_cached_bytes))
-
-  # check if the memory usage as counted by the CUDA allocator wrapper
-  # matches what is reported by the pool implementation
-  discrepancy = Base.abs(usage[dev][] - alloc_total_bytes)
-  if discrepancy != 0
-    println(io, "Discrepancy of $(Base.format_bytes(discrepancy)) between memory pool and allocator!")
-  end
-
-  if Base.JLOptions().debug_level >= 2
-    requested′, allocated′ = @lock requested_lock begin
-      copy(requested[dev]), copy(allocated[dev])
+  if stream_ordered(state.device)
+    pool = memory_pool(state.device)
+    if version() >= v"11.3"
+      pool_reserved_bytes = attribute(UInt64, pool, MEMPOOL_ATTR_RESERVED_MEM_CURRENT)
+      pool_used_bytes = attribute(UInt64, pool, MEMPOOL_ATTR_USED_MEM_CURRENT)
+      @printf(io, "Memory pool usage: %s (%s reserved)",
+                  Base.format_bytes(pool_used_bytes),
+                  Base.format_bytes(pool_reserved_bytes))
+    else
+      @printf(io, "Memory pool statistics require CUDA 11.3.")
     end
-    for (ptr, bt) in requested′
-      block = allocated′[ptr]
-      @printf(io, "\nOutstanding memory allocation of %s at %p",
-              Base.format_bytes(sizeof(block)), Int(ptr))
-      stack = stacktrace(bt, false)
-      StackTraces.remove_frames!(stack, :alloc)
-      Base.show_backtrace(io, stack)
-      println(io)
-    end
+  else
+    @printf(io, "No memory pool is in use.")
+  end
+end
+
+"""
+    cached_memory()
+
+Returns the cached amount of memory (in bytes) being held on by the CUDA allocator.
+"""
+function cached_memory()
+  state = active_state()
+  if version() >= v"11.3" && stream_ordered(state.device)
+    # we can only query the memory pool's reserved memory on CUDA 11.3 and later
+    pool = memory_pool(state.device)
+    Int(attribute(UInt64, pool, MEMPOOL_ATTR_RESERVED_MEM_CURRENT))
+  else
+    0
   end
 end

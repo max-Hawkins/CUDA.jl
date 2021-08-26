@@ -1,5 +1,8 @@
 # wrappers for functionality provided by the CUDA toolkit
 
+# special intrinsics for writing version-dependent code
+include("intrinsics/version.jl")
+
 # extensions to the C language
 include("intrinsics/memory_shared.jl")
 include("intrinsics/indexing.jl")
@@ -29,7 +32,7 @@ include("intrinsics/math.jl")
 # The libcudadevrt library is a collection of PTX bitcode functions that implement parts of
 # the CUDA API for execution on the device, such as device synchronization primitives,
 # dynamic kernel APIs, etc.
-using CEnum
+using CEnum: @cenum
 include("intrinsics/libcudadevrt_common.jl")
 include("intrinsics/libcudadevrt.jl")
 include("intrinsics/cooperative_groups.jl")

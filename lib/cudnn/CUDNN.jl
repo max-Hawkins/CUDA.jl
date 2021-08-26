@@ -13,9 +13,7 @@ using ..CUDA
 using ..CUDA: CUstream, libraryPropertyType
 using ..CUDA: libcudnn, @retry_reclaim, isdebug, @context!
 
-using CEnum
-
-using DataStructures
+using CEnum: @cenum
 
 
 # core library

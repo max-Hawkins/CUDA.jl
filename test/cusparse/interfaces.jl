@@ -17,6 +17,9 @@ using LinearAlgebra, SparseArrays
         db = CuArray(b)
         dc = CuArray(c)
 
+        # test with empty inputs
+        @test Array(dA * CUDA.zeros(elty, n, 0)) == zeros(elty, n, 0)
+
         mul!(c, f(A), b, alpha, beta)
         mul!(dc, f(dA), db, alpha, beta)
         @test c ≈ collect(dc)
@@ -63,4 +66,31 @@ using LinearAlgebra, SparseArrays
         mul!(dC, f(Symmetric(dA)), h(dB), alpha, beta)
         @test C ≈ collect(dC)
     end
+
+    @testset "issue #1095 ($elty)" for elty in [Float32, Float64, ComplexF32, ComplexF64]
+        # Test non-square matrices
+        n, m, p = 10, 20, 4
+        alpha = rand()
+        beta = rand()
+        A = sprand(elty, n, m, rand())
+        B = rand(elty, m, p)
+        C = rand(elty, n, p)
+
+        dA = CuSparseMatrixCSR(A)
+        dB = CuArray(B)
+        dC = CuArray(C)
+
+        mul!(C, A, B, alpha, beta)
+        mul!(dC, dA, dB, alpha, beta)
+        @test C ≈ collect(dC)
+
+        mul!(B, transpose(A), C, alpha, beta)
+        mul!(dB, transpose(dA), dC, alpha, beta)
+        @test B ≈ collect(dB)
+
+        mul!(B, adjoint(A), C, alpha, beta)
+        mul!(dB, adjoint(dA), dC, alpha, beta)
+        @test B ≈ collect(dB)
+    end
 end
+

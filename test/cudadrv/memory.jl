@@ -53,7 +53,7 @@ for srcTy in [Mem.Device, Mem.Host, Mem.Unified],
 
     # test device with context in which pointer was allocated.
     @test CuDevice(typed_pointer(src, T)) == device()
-    if !Mem.has_stream_ordered()
+    if !CUDA.has_stream_ordered(device())
         # NVIDIA bug #3319609
         @test CuContext(typed_pointer(src, T)) == context()
     end
@@ -70,6 +70,8 @@ for srcTy in [Mem.Device, Mem.Host, Mem.Unified],
         @test_throws ArgumentError convert(Ptr, src)
     end
 
+    @grab_output show(stdout, src)
+    @grab_output show(stdout, dst)
     Mem.free(src)
     Mem.free(dst)
 end
@@ -89,7 +91,7 @@ let
 
     unsafe_copyto!(typed_pointer(src, T), pointer(data), N; async=true)
 
-    Mem.set!(typed_pointer(src, T), zero(T), N; async=true, stream=stream())
+    Mem.set!(typed_pointer(src, T), zero(T), N; stream=stream())
 
     Mem.free(src)
 end
