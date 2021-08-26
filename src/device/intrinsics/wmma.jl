@@ -121,13 +121,6 @@ Wrapper around the LLVM intrinsic `@llvm.nvvm.wmma.load.{matrix}.sync.{layout}.{
 llvm_wmma_load() = error("Cannot call llvm_wmma_load without values for placeholders!")
 export llvm_wmma_load
 
-# for mat in ["a", "b", "c"],
-#     layout in ["col", "row"],
-#     shape in ["m16n16k16"],
-#     addr_space in ["", "shared", "global"],
-#     stride in ["stride"],
-#     elem_type in ["f16", "f32"]
-
 for ops in all_ldst_ops,
     shape in ops[1],
     mat in ops[2],
@@ -136,14 +129,7 @@ for ops in all_ldst_ops,
     addr_space in ["", "shared", "global"],
     stride in ["stride"]
 
-
-
     # TODO: Non-stride versions?
-
-    # Float32 is only supported for C
-    # if (elem_type == "f32") && (mat != "c")
-    #     continue
-    # end
 
     addr_space_int = get_addrspace_info(addr_space)
 
@@ -188,13 +174,6 @@ Wrapper around the LLVM intrinsic `@llvm.nvvm.wmma.store.d.sync.{layout}.{shape}
 """
 llvm_wmma_store() = error("Cannot call llvm_wmma_store without values for placeholders!")
 export llvm_wmma_store
-
-# for mat in ["d"],
-#     layout in ["col", "row"],
-#     shape in ["m16n16k16"],
-#     addr_space in ["", "shared", "global"],
-#     stride in ["stride"],
-#     elem_type in ["f16", "f32"]
 
     for ops in all_ldst_ops,
         shape in ops[1],
@@ -260,14 +239,6 @@ Wrapper around the LLVM intrinsic `@llvm.nvvm.wmma.mma.sync.{a_layout}.{b_layout
 llvm_wmma_mma() = error("Cannot call llvm_wmma_mma without values for placeholders!")
 export llvm_wmma_mma
 
-# for a_layout in ["col", "row"],
-#     b_layout in ["col", "row"],
-#     shape in ["m16n16k16"],
-#     d_elem_type in ["f16", "f32"],
-#     c_elem_type in ["f16", "f32"],
-#     b_elem_type in ["f16"],
-#     a_elem_type in ["f16"]
-
 # WMMA ops: Shape, A/B type, C/D type
 int_wmma_ops = ["m16n16k16"], ["u8", "s8"], ["s32"]
 half_wmma_ops = ["m16n16k16"], ["f16"], ["f16", "f32"]
@@ -282,8 +253,6 @@ for ops in all_wmma_ops,
     b_elem_type in ops[2]
 
     a_elem_type = b_elem_type
-
-    
 
     # Name of the LLVM intrinsic
     # If integer A/B types, name is determined by A/B types

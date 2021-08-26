@@ -76,7 +76,7 @@ const map_ptx_to_jl_frag = Dict(
         end
     end
 
-    @testset verbose = true "llvm_wmma_store" begin
+    @testset "llvm_wmma_store" begin
         @testset "$(mat)_$(layout)_$(shape)_$(addr_space)_$(elem_type)" for mat in ["d"],
             layout in ["row", "col"],
             shape in ["m16n16k16"],
