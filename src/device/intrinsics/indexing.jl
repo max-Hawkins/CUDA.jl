@@ -30,7 +30,7 @@ export
             ret!(builder, idx)
         end
 
-        call_function(llvm_f, UInt32)
+        call_function(llvm_f, Int32)
     end
 end
 
@@ -43,67 +43,67 @@ for dim in (:x, :y, :z)
     # Thread index
     fn = Symbol("threadIdx_$dim")
     intr = Symbol("tid.$dim")
-    @eval @inline $fn() = Int(_index($(Val(intr)), $(Val(0:max_block_size[dim]-1)))) + 1
+    @eval @inline $fn() = _index($(Val(intr)), $(Val(0:max_block_size[dim]-1))) + 1i32
 
     # Block size (#threads per block)
     fn = Symbol("blockDim_$dim")
     intr = Symbol("ntid.$dim")
-    @eval @inline $fn() = Int(_index($(Val(intr)), $(Val(1:max_block_size[dim]))))
+    @eval @inline $fn() = _index($(Val(intr)), $(Val(1:max_block_size[dim])))
 
     # Block index
     fn = Symbol("blockIdx_$dim")
     intr = Symbol("ctaid.$dim")
-    @eval @inline $fn() = Int(_index($(Val(intr)), $(Val(0:max_grid_size[dim]-1)))) + 1
+    @eval @inline $fn() = _index($(Val(intr)), $(Val(0:max_grid_size[dim]-1))) + 1i32
 
     # Grid size (#blocks per grid)
     fn = Symbol("gridDim_$dim")
     intr = Symbol("nctaid.$dim")
-    @eval @inline $fn() = Int(_index($(Val(intr)), $(Val(1:max_grid_size[dim]))))
+    @eval @inline $fn() = _index($(Val(intr)), $(Val(1:max_grid_size[dim])))
 end
 
 @device_functions begin
 
 """
-    gridDim()::CuDim3
+    gridDim()::NamedTuple
 
 Returns the dimensions of the grid.
 """
 @inline gridDim() =   (x=gridDim_x(),   y=gridDim_y(),   z=gridDim_z())
 
 """
-    blockIdx()::CuDim3
+    blockIdx()::NamedTuple
 
 Returns the block index within the grid.
 """
 @inline blockIdx() =  (x=blockIdx_x(),  y=blockIdx_y(),  z=blockIdx_z())
 
 """
-    blockDim()::CuDim3
+    blockDim()::NamedTuple
 
 Returns the dimensions of the block.
 """
 @inline blockDim() =  (x=blockDim_x(),  y=blockDim_y(),  z=blockDim_z())
 
 """
-    threadIdx()::CuDim3
+    threadIdx()::NamedTuple
 
 Returns the thread index within the block.
 """
 @inline threadIdx() = (x=threadIdx_x(), y=threadIdx_y(), z=threadIdx_z())
 
 """
-    warpsize()::UInt32
+    warpsize()::Int32
 
 Returns the warp size (in threads).
 """
-@inline warpsize() = Int(ccall("llvm.nvvm.read.ptx.sreg.warpsize", llvmcall, UInt32, ()))
+@inline warpsize() = ccall("llvm.nvvm.read.ptx.sreg.warpsize", llvmcall, Int32, ())
 
 """
-    laneid()::UInt32
+    laneid()::Int32
 
 Returns the thread's lane within the warp.
 """
-@inline laneid() = Int(ccall("llvm.nvvm.read.ptx.sreg.laneid", llvmcall, UInt32, ()))+UInt32(1)
+@inline laneid() = ccall("llvm.nvvm.read.ptx.sreg.laneid", llvmcall, Int32, ()) + 1i32
 
 """
     active_mask()

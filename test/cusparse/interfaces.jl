@@ -2,6 +2,74 @@ using CUDA.CUSPARSE
 using LinearAlgebra, SparseArrays
 
 @testset "LinearAlgebra" begin
+    @testset "$f(A)±$h(B) $elty" for elty in [Float32, Float64, ComplexF32, ComplexF64],
+                                     f in (identity, transpose), #adjoint),
+                                     h in (identity, transpose)#, adjoint)
+        # adjoint need the support of broadcast for `conj()` to work with `CuSparseMatrix`.
+        n = 10
+        alpha = rand()
+        beta = rand()
+        A = sprand(elty, n, n, rand())
+        B = sprand(elty, n, n, rand())
+
+        dA = CuSparseMatrixCSR(A)
+        dB = CuSparseMatrixCSR(B)
+
+        C = f(A) + h(B)
+        dC = f(dA) + h(dB)
+        @test C ≈ collect(dC)
+
+        C = f(A) - h(B)
+        dC = f(dA) - h(dB)
+        @test C ≈ collect(dC)
+    end
+
+    @testset "A±$f(B) $elty" for elty in [Float32, Float64, ComplexF32, ComplexF64],
+                                 f in (CuSparseMatrixCSR, CuSparseMatrixCSC, x->CuSparseMatrixBSR(x,1))
+        n = 10
+        A = sprand(elty, n, n, rand())
+        B = sprand(elty, n, n, rand())
+
+        dA = CuSparseMatrixCSR(A)
+        dB = CuSparseMatrixCSR(B)
+
+        C = A + B
+        dC = dA + f(dB)
+        @test C ≈ collect(dC)
+
+        C = B + A
+        dC = f(dB) + dA
+        @test C ≈ collect(dC)
+
+        C = A - B
+        dC = dA - f(dB)
+        @test C ≈ collect(dC)
+
+        C = B - A
+        dC = f(dB) - dA
+        @test C ≈ collect(dC)
+    end
+
+    @testset "dense(A)$(op)sparse(B) $elty" for elty in [Float32, Float64, ComplexF32, ComplexF64],
+                                                op in [+, -]
+        n = 10
+        A = rand(elty, n, n)
+        B = sprand(elty, n, n, rand())
+
+        dA = CuArray(A)
+        dB = CuSparseMatrixCSR(B)
+
+        C = op(A, B)
+        dC = op(dA, dB)
+        @test C ≈ collect(dC)
+        @test dC isa CuMatrix{elty}
+        
+        C = op(B, A)
+        dC = op(dB, dA)
+        @test C ≈ collect(dC)
+        @test dC isa CuMatrix{elty}
+    end
+
     @testset "$f(A)*b $elty" for elty in [Float32, Float64, ComplexF32, ComplexF64],
                                  f in (identity, transpose, adjoint)
         n = 10
@@ -67,6 +135,30 @@ using LinearAlgebra, SparseArrays
         @test C ≈ collect(dC)
     end
 
+    @testset "dense(A)*sparse(B) $elty" for elty in [Float32, Float64, ComplexF32, ComplexF64]
+        n = 10
+        A = rand(elty, n, n)
+        B = sprand(elty, n, n, rand())
+    
+        dA = CuArray(A)
+        dB = CUSPARSE.CuSparseMatrixCSR(B)
+    
+        C = A * B
+        dC = dA * dB
+        @test C ≈ collect(dC)
+        @test dC isa CuMatrix{elty}
+        
+        C = B * A
+        dC = dB * dA
+        @test C ≈ collect(dC)
+        @test dC isa CuMatrix{elty}
+    
+        C = B * B
+        dC = dB * dB
+        @test C ≈ collect(dC)
+        @test dC isa CuMatrix{elty}
+    end
+
     @testset "issue #1095 ($elty)" for elty in [Float32, Float64, ComplexF32, ComplexF64]
         # Test non-square matrices
         n, m, p = 10, 20, 4
@@ -91,6 +183,19 @@ using LinearAlgebra, SparseArrays
         mul!(B, adjoint(A), C, alpha, beta)
         mul!(dB, adjoint(dA), dC, alpha, beta)
         @test B ≈ collect(dB)
+    end
+
+    @testset "CuSparseMatrixCSR($f) $elty" for f in [transpose, adjoint], elty in [Float32, ComplexF32]
+        S = f(sprand(elty, 10, 10, 0.1))
+        @test SparseMatrixCSC(CuSparseMatrixCSR(S)) ≈ S
+
+        S = sprand(elty, 10, 10, 0.1)
+        T = f(CuSparseMatrixCSR(S))
+        @test SparseMatrixCSC(CuSparseMatrixCSC(T)) ≈ f(S)
+
+        S = sprand(elty, 10, 10, 0.1)
+        T = f(CuSparseMatrixCSC(S))
+        @test SparseMatrixCSC(CuSparseMatrixCSR(T)) ≈ f(S)
     end
 end
 

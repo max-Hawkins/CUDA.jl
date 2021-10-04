@@ -3,6 +3,8 @@ import Adapt
 
 @testset "constructors" begin
   xs = CuArray{Int}(undef, 2, 3)
+  @test device(xs) == device()
+  @test context(xs) == context()
   @test collect(CuArray([1 2; 3 4])) == [1 2; 3 4]
   @test collect(cu[1, 2, 3]) == [1, 2, 3]
   @test collect(cu([1, 2, 3])) == [1, 2, 3]
@@ -46,6 +48,17 @@ import Adapt
     test_eq(Base.unsafe_wrap(CuArray, ptr, (1,2)),          CuArray{Int,2}(data.storage, (1,2)))
     test_eq(Base.unsafe_wrap(CuArray{Int}, ptr, (1,2)),     CuArray{Int,2}(data.storage, (1,2)))
     test_eq(Base.unsafe_wrap(CuArray{Int,2}, ptr, (1,2)),   CuArray{Int,2}(data.storage, (1,2)))
+  end
+  let buf = Mem.alloc(Mem.Host, sizeof(Int), Mem.HOSTALLOC_DEVICEMAP)
+    gpu_ptr = convert(CuPtr{Int}, buf)
+    gpu_arr = Base.unsafe_wrap(CuArray, gpu_ptr, 1)
+    gpu_arr .= 42
+
+    synchronize()
+
+    cpu_ptr = convert(Ptr{Int}, buf)
+    cpu_arr = Base.unsafe_wrap(Array, cpu_ptr, 1)
+    @test cpu_arr == [42]
   end
 
   @test collect(CUDA.zeros(2, 2)) == zeros(Float32, 2, 2)
@@ -164,6 +177,18 @@ end
 
     c = reinterpret(UInt32, b)
     @test Array(c) == reinterpret(UInt32, Int32[-2,-3])
+  end
+
+  @testset "reinterpret(reshape)" begin
+    a = CuArray(ComplexF32[1.0f0+2.0f0*im, 2.0f0im, 3.0f0im])
+    b = reinterpret(reshape, Float32, a)
+    @test a isa CuArray{ComplexF32, 1}
+    @test b isa CuArray{Float32, 2}
+    @test Array(b) == [1.0 0.0 0.0; 2.0 2.0 3.0]
+
+    a = CuArray(Float32[1.0 0.0 0.0; 2.0 2.0 3.0])
+    b = reinterpret(reshape, ComplexF32, a)
+    @test Array(b) == ComplexF32[1.0f0+2.0f0*im, 2.0f0im, 3.0f0im]
   end
 
   @testset "exception: non-isbits" begin
@@ -595,6 +620,23 @@ end
   expected = sum(a, dims=2)
   actual = sum(c, dims=2)
   @test expected == Array(actual)
+
+  @testset "#1169" begin
+    function test_cuda_sum!(Nx, Ny, Nz)
+        A = randn(Nx, Ny, Nz)
+        R = zeros(1, Ny, Nz)
+        dA = CuArray(A)
+        dR = CuArray(R)
+        sum!(dR, dA)
+        sum!(R, A)
+        R ≈ Array(dR)
+    end
+
+    @test test_cuda_sum!(32, 32, 32)
+    @test test_cuda_sum!(256, 256, 256)
+    @test test_cuda_sum!(512, 512, 512)
+    @test test_cuda_sum!(85, 1320, 100)
+  end
 end
 
 @testset "unified memory" begin
@@ -679,4 +721,23 @@ end
       @test eltype(a) == Float32
     end
   end
+end
+
+if length(devices()) > 1
+@testset "multigpu" begin
+  dev = device()
+  other_devs = filter(!isequal(dev), collect(devices()))
+  other_dev = first(other_devs)
+
+  @testset "issue 1176" begin
+    A = [1,2,3]
+    dA = CuArray(A)
+    synchronize()
+    B = fetch(@async begin
+        device!(other_dev)
+        Array(dA)
+    end)
+    @test A == B
+  end
+end
 end

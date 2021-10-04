@@ -24,15 +24,13 @@ function precompile_runtime(caps=CUDA.llvm_compat(LLVM.version()).cap)
     return
 end
 
-@eval @inline exception_flag() =
-    Base.llvmcall(
-        $("""@exception_flag = weak externally_initialized global i$(WORD_SIZE) 0
-             define i64 @entry() #0 {
-                 %ptr = load i$(WORD_SIZE), i$(WORD_SIZE)* @exception_flag, align 8
-                 ret i$(WORD_SIZE) %ptr
-             }
-             attributes #0 = { alwaysinline }
-          """, "entry"), Ptr{Cvoid}, Tuple{})
+struct KernelState
+    exception_flag::Ptr{Cvoid}
+end
+
+@inline @generated kernel_state() = GPUCompiler.kernel_state_value(KernelState)
+
+exception_flag() = kernel_state().exception_flag
 
 function signal_exception()
     ptr = exception_flag()

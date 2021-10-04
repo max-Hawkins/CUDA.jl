@@ -111,11 +111,9 @@ A buffer of pinned memory on the CPU, possibly accessible on the GPU.
 struct HostBuffer <: AbstractBuffer
     ptr::Ptr{Cvoid}
     bytesize::Int
-
-    mapped::Bool
 end
 
-HostBuffer() = HostBuffer(C_NULL, 0, false)
+HostBuffer() = HostBuffer(C_NULL, 0)
 
 Base.pointer(buf::HostBuffer) = buf.ptr
 Base.sizeof(buf::HostBuffer) = buf.bytesize
@@ -127,14 +125,10 @@ Base.convert(::Type{Ptr{T}}, buf::HostBuffer) where {T} =
     convert(Ptr{T}, pointer(buf))
 
 function Base.convert(::Type{CuPtr{T}}, buf::HostBuffer) where {T}
-    if buf.mapped
-        pointer(buf) == C_NULL && return convert(CuPtr{T}, CU_NULL)
-        ptr_ref = Ref{CuPtr{Cvoid}}()
-        CUDA.cuMemHostGetDevicePointer_v2(ptr_ref, pointer(buf), #=flags=# 0)
-        convert(CuPtr{T}, ptr_ref[])
-    else
-        throw(ArgumentError("cannot take the GPU address of a pinned but not mapped CPU buffer"))
-    end
+    pointer(buf) == C_NULL && return convert(CuPtr{T}, CU_NULL)
+    ptr_ref = Ref{CuPtr{Cvoid}}()
+    CUDA.cuMemHostGetDevicePointer_v2(ptr_ref, pointer(buf), #=flags=# 0)
+    convert(CuPtr{T}, ptr_ref[])
 end
 
 
@@ -163,8 +157,7 @@ function alloc(::Type{HostBuffer}, bytesize::Integer, flags=0)
     ptr_ref = Ref{Ptr{Cvoid}}()
     CUDA.cuMemHostAlloc(ptr_ref, bytesize, flags)
 
-    mapped = (flags & HOSTALLOC_DEVICEMAP) != 0
-    return HostBuffer(ptr_ref[], bytesize, mapped)
+    return HostBuffer(ptr_ref[], bytesize)
 end
 
 
@@ -186,8 +179,7 @@ function register(::Type{HostBuffer}, ptr::Ptr, bytesize::Integer, flags=0)
 
     CUDA.cuMemHostRegister_v2(ptr, bytesize, flags)
 
-    mapped = (flags & HOSTREGISTER_DEVICEMAP) != 0
-    return HostBuffer(ptr, bytesize, mapped)
+    return HostBuffer(ptr, bytesize)
 end
 
 """
@@ -746,12 +738,26 @@ end
 
 # some common attributes
 
+"""
+    context(ptr)
+
+Identify the context a CUDA memory buffer was allocated in.
+"""
+context(ptr::Union{Ptr,CuPtr}) =
+    _CuContext(attribute(CUcontext, ptr, POINTER_ATTRIBUTE_CONTEXT))
+
+"""
+    device(ptr)
+
+Identify the device a CUDA memory buffer was allocated on.
+"""
+device(x::Union{Ptr,CuPtr}) =
+    CuDevice(convert(Int, attribute(Cuint, x, POINTER_ATTRIBUTE_DEVICE_ORDINAL)))
+
 @enum_without_prefix CUmemorytype CU_
 memory_type(x) = CUmemorytype(attribute(Cuint, x, POINTER_ATTRIBUTE_MEMORY_TYPE))
 
 is_managed(x) = convert(Bool, attribute(Cuint, x, POINTER_ATTRIBUTE_IS_MANAGED))
-
-CuDevice(x::Union{Ptr,CuPtr}) = CuDevice(convert(Int, attribute(Cuint, x, POINTER_ATTRIBUTE_DEVICE_ORDINAL)))
 
 function is_pinned(ptr::Ptr)
     # unpinned memory makes cuPointerGetAttribute return ERROR_INVALID_VALUE; but instead of

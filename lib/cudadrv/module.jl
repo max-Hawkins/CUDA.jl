@@ -39,6 +39,9 @@ mutable struct CuModule
         #      release threshold, we have it actually free up that memory, but that requires
         #      synchronizing all streams to make sure pending frees are actually executed.
         device_synchronize()
+        #
+        # XXX: our custom legacy stream sync doesn't release memory (NVIDIA bug #3383169)
+        cuCtxSynchronize()
 
         # FIXME: maybe all CUDA API calls need to run under retry_reclaim?
         #        that would require a redesign of the memory pool,
@@ -67,7 +70,7 @@ mutable struct CuModule
             end
         end
 
-        ctx = CuCurrentContext()
+        ctx = current_context()
         obj = new(handle_ref[], ctx)
         finalizer(unsafe_unload!, obj)
         return obj
