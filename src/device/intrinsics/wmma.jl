@@ -28,21 +28,63 @@ const map_ptx_to_jl_frag = Dict(
 
 # Maps matrix & PTX types to fragment sizes
 const map_frag_sizes = Dict(
-                            "a.u8"  => 2,
-                            "a.s8"  => 2,
-                            "a.f16" => 8,
-
-                            "b.u8"  => 2,
-                            "b.s8"  => 2,
-                            "b.f16" => 8,
-
-			                "c.s32" => 8,
-                            "c.f16" => 4,
-                            "c.f32" => 8,
+                            #"a.u8"  => 2,
+                            "a.u8.m16n16k16" => 2,
+                            "a.u8.m8n32k16"  => 1,
+                            "a.u8.m32n8k16"  => 4,
+                            # "a.s8"  => 2,
+                            "a.s8.m16n16k16" => 2,
+                            "a.s8.m8n32k16"  => 1,
+                            "a.s8.m32n8k16"  => 4,
                             
-                            "d.s32" => 8,
-                            "d.f16" => 4,
-                            "d.f32" => 8
+                            # "a.f16" => 8,
+                            "a.f16.m16n16k16"=> 8,
+                            "a.f16.m8n32k16" => 8,
+                            "a.f16.m32n8k16" => 8,
+
+                            # "b.u8"  => 2,
+                            "b.u8.m16n16k16"  => 2,
+                            "b.u8.m8n32k16"  => 4,
+                            "b.u8.m32n8k16"  => 1,
+                            # "b.s8"  => 2,
+                            "b.s8.m16n16k16"  => 2,
+                            "b.s8.m8n32k16"  => 4,
+                            "b.s8.m32n8k16"  => 1,
+
+                            # "b.f16" => 8,
+                            "b.f16.m16n16k16" => 8,
+                            "b.f16.m8n32k16" => 8,
+                            "b.f16.m32n8k16" => 8,
+
+			                # "c.s32" => 8,
+                            "c.s32.m16n16k16" => 8,
+                            "c.s32.m8n32k16" => 8,
+                            "c.s32.m32n8k16" => 8,
+
+                            # "c.f16" => 4,
+                            "c.f16.m16n16k16" => 4,
+                            "c.f16.m8n32k16" => 4,
+                            "c.f16.m32n8k16" => 4,
+
+                            # "c.f32" => 8,
+                            "c.f32.m16n16k16" => 8,
+                            "c.f32.m8n32k16" => 8,
+                            "c.f32.m32n8k16" => 8,
+                            
+                            # "d.s32" => 8,
+                            "d.s32.m16n16k16" => 8,
+                            "d.s32.m8n32k16" => 8,
+                            "d.s32.m32n8k16" => 8,
+
+                            # "d.f16" => 4, ------------------
+                            "d.f16.m16n16k16" => 4,
+                            "d.f16.m8n32k16" => 4,
+                            "d.f16.m32n8k16" => 4,
+
+                            # "d.f32" => 8
+                            "d.f32.m16n16k16" => 8,
+                            "d.f32.m8n32k16" => 8,
+                            "d.f32.m32n8k16" => 8,
                            )
 
 # Maps PTX AS to CUDA.AS
@@ -52,28 +94,35 @@ const map_ptx_as_to_as_ty = Dict(
                                  "global" => AS.Global
                                 )
 
-ldst_ab_ops = ["m16n16k16", "m32n8k16", "m8n32k16"], ["a", "b"], ["f16", "u8", "s8"]
-ldst_cd_ops = ["m16n16k16", "m32n8k16", "m8n32k16"], ["c", "d"], ["f16", "f32", "s32"]
+ldst_half_ab_ops = ["m16n16k16"], ["a", "b"], ["f16"]
+ldst_half_cd_ops = ["m16n16k16"], ["c", "d"], ["f16", "f32"]
+wmma_half_ops    = ["m16n16k16"], ["f16"], ["f16", "f32"], ["f16", "f32"]
+
 ldst_int_ab_ops = ["m16n16k16"], ["a", "b"], ["u8", "s8"]
 ldst_int_cd_ops = ["m16n16k16"], ["c", "d"], ["s32"]
-ldst_subint_ab_ops = ["m8n8k32"], ["a", "b"], ["s4","u4"]
-ldst_bit_ab_ops = ["m8n8k128"], ["a", "b"], ["b1"]
-ldst_subint_cd_ops = ["m8n8k32", "m8n8k128"],  ["c", "d"], ["s32"]
+wmma_int_ops    = ["m16n16k16"], ["s8", "u8"], ["s32"], ["s32"]
 
-all_ldst_ops = vcat(ldst_ab_ops, ldst_cd_ops)
-                    #ldst_subint_ab_ops,
-                    #ldst_bit_ab_ops,
-                    #ldst_subint_cd_ops);
+ldst_subint_ab_ops = ["m8n8k32"], ["a", "b"], ["s4","u4"]
+ldst_subint_cd_ops = ["m8n8k32", "m8n8k128"],  ["c", "d"], ["s32"]
+wmma_subint_ops = []
+
+# Bit load/store c/d operations are the same as s4/u4
+ldst_bit_ab_ops = ["m8n8k128"], ["a", "b"], ["b1"]
+wmma_bit_ops = []
+
+const all_ldst_ops = vcat(ldst_half_ab_ops, ldst_half_cd_ops,
+                          ldst_int_ab_ops,  ldst_int_cd_ops)
+const all_wmma_ops = vcat(wmma_half_ops, wmma_int_ops)
 
 ################################################################################
 # HELPER FUNCTIONS
 ################################################################################
 
 # Returns (Julia array type, Julia fragment type, fragment size)
-get_frag_info(matrix, ptx_el_type) = (
+get_frag_info(matrix, ptx_el_type, shape) = (
         map_ptx_to_jl_array[ptx_el_type],
         map_ptx_to_jl_frag[ptx_el_type],
-        map_frag_sizes["$matrix.$ptx_el_type"]
+        map_frag_sizes["$matrix.$ptx_el_type.$shape"]
         )
 
 get_addrspace_info(addr_space) = convert(Int, map_ptx_as_to_as_ty[addr_space])
@@ -140,7 +189,7 @@ for ops in all_ldst_ops,
     llvm_intr = "llvm.nvvm.wmma.$shape.load.$mat.$layout.stride.$elem_type.p$(addr_space_int)i8"
 
     # Determine types + size for this (matrix, elem_type) combination
-    arr_ty, frag_ty, sz = get_frag_info(mat, elem_type)
+    arr_ty, frag_ty, sz = get_frag_info(mat, elem_type, shape)
 
     ccall_name = "extern $llvm_intr"
 
@@ -197,7 +246,7 @@ export llvm_wmma_store
     llvm_intr = "llvm.nvvm.wmma.$shape.store.$mat.$layout.stride.$elem_type.p$(addr_space_int)i8"
 
     # Determine types + size for this (matrix, elem_type) combination
-    arr_ty, frag_ty, sz = get_frag_info(mat, elem_type)
+    arr_ty, frag_ty, sz = get_frag_info(mat, elem_type, shape)
 
     ccall_name = "extern $llvm_intr"
     frag_types = ntuple(i -> frag_ty, sz)
@@ -239,16 +288,11 @@ Wrapper around the LLVM intrinsic `@llvm.nvvm.wmma.mma.sync.{a_layout}.{b_layout
 llvm_wmma_mma() = error("Cannot call llvm_wmma_mma without values for placeholders!")
 export llvm_wmma_mma
 
-# WMMA ops: Shape, A/B type, C/D type
-int_wmma_ops = ["m16n16k16"], ["u8", "s8"], ["s32"]
-half_wmma_ops = ["m16n16k16"], ["f16"], ["f16", "f32"]
-all_wmma_ops = vcat(half_wmma_ops, int_wmma_ops)
-
 for ops in all_wmma_ops,
     a_layout in ["col", "row"],
     b_layout in ["col", "row"],
     shape in ops[1],
-    d_elem_type in ops[3],
+    d_elem_type in ops[4],
     c_elem_type in ops[3],
     b_elem_type in ops[2]
 
@@ -267,10 +311,10 @@ for ops in all_wmma_ops,
     end
 
     # Determine types + size for the (matrix, elem_type) combinations for matrix A, B, C and D
-    a_arr_ty, a_frag_ty, a_sz = get_frag_info("a", a_elem_type)
-    b_arr_ty, b_frag_ty, b_sz = get_frag_info("b", b_elem_type)
-    c_arr_ty, c_frag_ty, c_sz = get_frag_info("c", c_elem_type)
-    d_arr_ty, d_frag_ty, d_sz = get_frag_info("d", d_elem_type)
+    a_arr_ty, a_frag_ty, a_sz = get_frag_info("a", a_elem_type, shape)
+    b_arr_ty, b_frag_ty, b_sz = get_frag_info("b", b_elem_type, shape)
+    c_arr_ty, c_frag_ty, c_sz = get_frag_info("c", c_elem_type, shape)
+    d_arr_ty, d_frag_ty, d_sz = get_frag_info("d", d_elem_type, shape)
 
     ccall_name = "extern $llvm_intr"
 
@@ -490,7 +534,7 @@ end
 
 get_hl_mat_use(mat) = map_matrix_to_use[mat]
 
-function get_hl_frag_info(matrix, T)
+function get_hl_frag_info(matrix, T, shape)
     ptx_ty = nothing
 
     try
@@ -501,7 +545,7 @@ function get_hl_frag_info(matrix, T)
 
     try
         return (map_num_elems[(matrix, T)],
-                map_frag_sizes["$matrix.$ptx_ty"],
+                map_frag_sizes["$matrix.$ptx_ty.$shape"],
                 map_ptx_to_jl_frag[ptx_ty],
                 ptx_ty)
     catch
@@ -548,7 +592,7 @@ for mat in ["a", "b", "c"]
         as_str                 = get_hl_as_info(AS)
         layout                 = get_hl_layout(L)
         shape                  = get_hl_shape(M, N, K)
-        num_els, _, _, arr_str = get_hl_frag_info($mat, T)
+        num_els, _, _, arr_str = get_hl_frag_info($mat, T, shape)
         U                      = get_hl_mat_use($mat)
         L_ret                  = ($mat == "c") ? Unspecified : L
 
@@ -593,14 +637,16 @@ mma
                         c::Fragment{M, N, K, C_SZ, C_T, Unspecified, Accumulator},
                         config::Type{Config{M, N, K, D_T}}) where {M, N, K, A_SZ, A_T, A_L, B_SZ, B_T, B_L, C_SZ, C_T, D_T}
 
-    _, a_frag_sz, a_frag_ty, _         = get_hl_frag_info("a", A_T)
-    _, b_frag_sz, b_frag_ty, _         = get_hl_frag_info("b", B_T)
-    _, c_frag_sz, c_frag_ty, c_arr_str = get_hl_frag_info("c", C_T)
-    d_num_els, _, _, d_arr_str         = get_hl_frag_info("d", D_T)
-
     a_layout = get_hl_layout(A_L)
     b_layout = get_hl_layout(B_L)
     shape = get_hl_shape(M, N, K)
+
+    _, a_frag_sz, a_frag_ty, _         = get_hl_frag_info("a", A_T, shape)
+    _, b_frag_sz, b_frag_ty, _         = get_hl_frag_info("b", B_T, shape)
+    _, c_frag_sz, c_frag_ty, c_arr_str = get_hl_frag_info("c", C_T, shape)
+    d_num_els, _, _, d_arr_str         = get_hl_frag_info("d", D_T, shape)
+
+    
 
     # Name of the Julia wrapper
     wrapper = Symbol(join(filter(!isempty, ["llvm", "wmma", "mma", a_layout, b_layout, shape, d_arr_str, c_arr_str]), "_"))
@@ -652,7 +698,7 @@ store_d
     as_str                             = get_hl_as_info(AS)
     layout                             = get_hl_layout(L)
     shape                              = get_hl_shape(M, N, K)
-    num_els, frag_sz, frag_ty, arr_str = get_hl_frag_info("d", T)
+    num_els, frag_sz, frag_ty, arr_str = get_hl_frag_info("d", T, shape)
 
     # Name of the Julia wrapper
     wrapper = Symbol(join(filter(!isempty, ["llvm", "wmma", "store", "d", layout, shape, as_str, "stride", arr_str]), "_"))
@@ -689,7 +735,8 @@ fill_c
 
     # We can't use closures in @generated functions, so we'll have to do it this way instead of
     # ntuple(i -> val, $num_els)
-    num_els, _, _ = get_hl_frag_info("c", T)
+    shape = get_hl_shape(M, N, K)
+    num_els, _, _ = get_hl_frag_info("c", T, shape)
 
     args = [:value for i=1:num_els]
     expr = :(tuple($(args...)))
