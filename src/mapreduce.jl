@@ -7,7 +7,7 @@
 # Reduce a value across a warp
 @inline function reduce_warp(op, val)
     assume(warpsize() == 32)
-    offset = UInt32(1)
+    offset = 0x00000001
     while offset < warpsize()
         val = op(val, shfl_down_sync(0xffffffff, val, offset))
         offset <<= 1
@@ -134,42 +134,51 @@ function partial_mapreduce_grid(f, op, neutral, Rreduce, Rother, shuffle, R, As.
     return
 end
 
-
-"""
-If `Rother` is large enough, then a naive loop is more efficient than partial
-reductions.
-"""
 function big_mapreduce_kernel(f, op, neutral, Rreduce, Rother, R, As)
-	val = op(neutral, neutral)
-	grid_idx = threadIdx().x + (blockIdx().x - 1) * blockDim().x
-	if grid_idx > length(Rother)
-		return
-	end
-	i = Rother[grid_idx]
-	j = j1 = Rreduce[1]
-	for j in Rreduce
-		val = op(val, f(As[i + j - j1]))
-	end
-	R[i] = val
-	return
-end
+    grid_idx = threadIdx().x + (blockIdx().x - 1i32) * blockDim().x
+    @inbounds if grid_idx <= length(Rother)
+        Iother = Rother[grid_idx]
 
-function big_mapreduce_threshold(dev)
-	max_concurrency = attribute(dev, DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK) *
-					  attribute(dev, DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
-	return max_concurrency
+        # load the neutral value
+        neutral = if neutral === nothing
+            R[Iother]
+        else
+            neutral
+        end
+
+        val = op(neutral, neutral)
+
+        Ibegin = Rreduce[1]
+        for Ireduce in Rreduce
+            val = op(val, f(As[Iother + Ireduce - Ibegin]))
+        end
+        R[Iother] = val
+    end
+    return
 end
 
 ## COV_EXCL_STOP
+
+# factored out for use in tests
+function big_mapreduce_threshold(dev)
+    max_concurrency = attribute(dev, DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK) *
+                      attribute(dev, DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
+    return max_concurrency
+end
 
 function GPUArrays.mapreducedim!(f::F, op::OP, R::AnyCuArray{T},
                                  A::Union{AbstractArray,Broadcast.Broadcasted};
                                  init=nothing) where {F, OP, T}
     Base.check_reducedims(R, A)
     length(A) == 0 && return R # isempty(::Broadcasted) iterates
+    dev = device()
 
     # be conservative about using shuffle instructions
-    shuffle = T <: Union{Bool, Int32, Int64, Float32, Float64, ComplexF32, ComplexF64}
+    shuffle = T <: Union{Bool,
+                         UInt8, UInt16, UInt32, UInt64, UInt128,
+                         Int8, Int16, Int32, Int64, Int128,
+                         Float16, Float32, Float64,
+                         ComplexF16, ComplexF32, ComplexF64}
 
     # add singleton dimensions to the output container, if needed
     if ndims(R) < ndims(A)
@@ -187,16 +196,16 @@ function GPUArrays.mapreducedim!(f::F, op::OP, R::AnyCuArray{T},
     @assert length(Rall) == length(Rother) * length(Rreduce)
     @assert length(Rother) > 0
 
-	dev = device()
-
-	if length(Rother) >= big_mapreduce_threshold(dev)
-		args = (f, op, init, Rreduce, Rother, R, A)
-		kernel = @cuda launch=false big_mapreduce_kernel(args...)
-		kernel_config = launch_configuration(kernel.fun)
-		t = kernel_config.threads
-		kernel(args...; threads=t, blocks=cld(length(Rother), t))
-		return R
-	end
+    # If `Rother` is large enough, then a naive loop is more efficient than partial reductions.
+    if length(Rother) >= big_mapreduce_threshold(dev)
+        args = (f, op, init, Rreduce, Rother, R, A)
+        kernel = @cuda launch=false big_mapreduce_kernel(args...)
+        kernel_config = launch_configuration(kernel.fun)
+        threads = kernel_config.threads
+        blocks = cld(length(Rother), threads)
+        kernel(args...; threads, blocks)
+        return R
+    end
 
     # allocate an additional, empty dimension to write the reduced value to.
     # this does not affect the actual location in memory of the final values,

@@ -22,6 +22,11 @@ macro async_benchmarkable(ex...)
     end
 end
 
+# before anything else, run latency benchmarks. these spawn subprocesses, so we don't want
+# to do so after regular benchmarks have caused the memory allocator to reserve memory.
+@info "Running latency benchmarks"
+latency_results = include("latency.jl")
+
 SUITE = BenchmarkGroup()
 
 # NOTE: don't use spaces in benchmark names (tobami/codespeed#256)
@@ -30,59 +35,30 @@ include("kernel.jl")
 include("array.jl")
 
 if real_run
-    @info "Warming up"
+    @info "Preparing main benchmarks"
     warmup(SUITE; verbose=false)
-
-    paramsfile = joinpath(first(DEPOT_PATH), "datadeps", "CUDA_benchmark_params.json")
-    # NOTE: using a path that survives across CI runs
-    mkpath(dirname(paramsfile))
-    if !isfile(paramsfile)
-        @warn "No saved parameters found, tuning all benchmarks"
-        tune!(SUITE)
-    else
-        loadparams!(SUITE, BenchmarkTools.load(paramsfile)[1], :evals, :samples)
-
-        # find untuned benchmarks for which we have the default evals==0
-        function find_untuned(group::BenchmarkGroup, untuned=Dict(), prefix="")
-            for (name, b) in group
-                find_untuned(b, untuned, isempty(prefix) ? name : "$prefix/$name")
-            end
-            return untuned
-        end
-        function find_untuned(b::BenchmarkTools.Benchmark, untuned=Dict(), prefix="")
-            if params(b).evals == 0
-                untuned[prefix] = b
-            end
-            return untuned
-        end
-        untuned = find_untuned(SUITE)
-
-        if !isempty(untuned)
-            @info "Re-tuning the following benchmarks: $(join(keys(untuned), ", "))"
-            foreach(tune!, values(untuned))
-        end
-    end
-    BenchmarkTools.save(paramsfile, params(SUITE))
+    tune!(SUITE)
 
     # reclaim memory that might have been used by the tuning process
     GC.gc(true)
     CUDA.reclaim()
 end
 
-# latency benchmarks spawn external processes and take very long,
-# so don't benefit from warm-up or tuning.
-include("latency.jl")
-
-# integration tests are currently not part of the benchmark suite
+# benchmark groups that aren't part of the suite
 addgroup!(SUITE, "integration")
 
-@info "Running benchmarks"
+@info "Running main benchmarks"
 results = run(SUITE, verbose=true)
 
 # integration tests (that do nasty things, so need to be run last)
-results["integration"]["volumerhs"] = include("volumerhs.jl")
-results["integration"]["byval"] = include("byval.jl")
-results["integration"]["cudadevrt"] = include("cudadevrt.jl")
+@info "Running integration benchmarks"
+integration_results = BenchmarkGroup()
+integration_results["volumerhs"] = include("volumerhs.jl")
+integration_results["byval"] = include("byval.jl")
+integration_results["cudadevrt"] = include("cudadevrt.jl")
+
+results["latency"] = latency_results
+results["integration"] = integration_results
 
 println(results)
 

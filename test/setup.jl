@@ -1,4 +1,5 @@
 using Distributed, Test, CUDA
+using CUDA: i32
 
 # GPUArrays has a testsuite that isn't part of the main package.
 # Include it directly.
@@ -52,6 +53,7 @@ function runtests(f, name, time_source=:cuda, snoop=nothing)
         end
 
         ex = quote
+            GC.gc(true)
             Random.seed!(1)
 
             if $(QuoteNode(time_source)) == :cuda
@@ -105,6 +107,7 @@ function runtests(f, name, time_source=:cuda, snoop=nothing)
         end
         res = vcat(collect(data), cpu_rss, gpu_rss)
 
+        GC.gc(true)
         CUDA.can_reset_device() && device_reset!()
         res
     finally
@@ -130,7 +133,7 @@ macro grab_output(ex)
                     ret = $(esc(ex))
 
                     # NOTE: CUDA requires a 'proper' sync to flush its printf buffer
-                    device_synchronize()
+                    synchronize(context())
                 end
             end
             ret, read(fname, String)

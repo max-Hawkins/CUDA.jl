@@ -174,7 +174,7 @@ The following keyword arguments are supported:
 """
 AbstractKernel
 
-@generated function call(kernel::AbstractKernel{F,TT}, args...; call_kwargs...) where {F,TT}
+@inline @generated function call(kernel::AbstractKernel{F,TT}, args...; call_kwargs...) where {F,TT}
     sig = Tuple{F, TT.parameters...}    # Base.signature_type with a function type
     args = (:(kernel.f), (:( args[$i] ) for i in 1:length(args))...)
 
@@ -193,12 +193,14 @@ AbstractKernel
         end
     end
 
+    # add the kernel state
+    pushfirst!(call_t, KernelState)
+    pushfirst!(call_args, :(kernel.state))
+
     # finalize types
     call_tt = Base.to_tuple_type(call_t)
 
     quote
-        Base.@_inline_meta
-
         cudacall(kernel.fun, $call_tt, $(call_args...); call_kwargs...)
     end
 end
@@ -211,6 +213,7 @@ struct HostKernel{F,TT} <: AbstractKernel{F,TT}
     ctx::CuContext
     mod::CuModule
     fun::CuFunction
+    state::KernelState
 end
 
 @doc (@doc AbstractKernel) HostKernel
@@ -448,13 +451,11 @@ end
     mod = @timeit_ci "CuModule" CuModule(compiled.image)
     fun = CuFunction(mod, compiled.entry)
 
-    # initialize and register the exception flag, if any
-    if "exception_flag" in compiled.external_gvars
-        create_exceptions!(mod)
-        filter!(!isequal("exception_flag"), compiled.external_gvars)
-    end
+    # create the kernel state object
+    exception_ptr = create_exceptions!(mod)
+    state = KernelState(exception_ptr)
 
-    return HostKernel{typeof(job.source.f),job.source.tt}(job.source.f, ctx, mod, fun)
+    return HostKernel{typeof(job.source.f),job.source.tt}(job.source.f, ctx, mod, fun, state)
 end
 
 function (kernel::HostKernel)(args...; threads::CuDim=1, blocks::CuDim=1, kwargs...)
@@ -467,6 +468,7 @@ end
 struct DeviceKernel{F,TT} <: AbstractKernel{F,TT}
     f::F
     fun::CuDeviceFunction
+    state::KernelState
 end
 
 @doc (@doc AbstractKernel) DeviceKernel
@@ -485,7 +487,7 @@ No keyword arguments are supported.
 @inline function dynamic_cufunction(f::F, tt::Type=Tuple{}) where {F <: Function}
     fptr = GPUCompiler.deferred_codegen(Val(f), Val(tt))
     fun = CuDeviceFunction(fptr)
-    DeviceKernel{F,tt}(f, fun)
+    DeviceKernel{F,tt}(f, fun, kernel_state())
 end
 
 (kernel::DeviceKernel)(args...; kwargs...) = call(kernel, args...; kwargs...)
