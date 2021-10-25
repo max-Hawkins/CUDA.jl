@@ -28,63 +28,53 @@ const map_ptx_to_jl_frag = Dict(
 
 # Maps matrix & PTX types to fragment sizes
 const map_frag_sizes = Dict(
-                            #"a.u8"  => 2,
-                            "a.u8.m16n16k16" => 2,
-                            "a.u8.m8n32k16"  => 1,
-                            "a.u8.m32n8k16"  => 4,
-                            # "a.s8"  => 2,
-                            "a.s8.m16n16k16" => 2,
-                            "a.s8.m8n32k16"  => 1,
-                            "a.s8.m32n8k16"  => 4,
-                            
-                            # "a.f16" => 8,
-                            "a.f16.m16n16k16"=> 8,
-                            "a.f16.m8n32k16" => 8,
-                            "a.f16.m32n8k16" => 8,
+                            "a.u8.m16n16k16"  => 2,
+                            "a.u8.m8n32k16"   => 1,
+                            "a.u8.m32n8k16"   => 4,
 
-                            # "b.u8"  => 2,
+                            "a.s8.m16n16k16"  => 2,
+                            "a.s8.m8n32k16"   => 1,
+                            "a.s8.m32n8k16"   => 4,
+                            
+                            "a.f16.m16n16k16" => 8,
+                            "a.f16.m8n32k16"  => 8,
+                            "a.f16.m32n8k16"  => 8,
+
                             "b.u8.m16n16k16"  => 2,
-                            "b.u8.m8n32k16"  => 4,
-                            "b.u8.m32n8k16"  => 1,
-                            # "b.s8"  => 2,
+                            "b.u8.m8n32k16"   => 4,
+                            "b.u8.m32n8k16"   => 1,
+
                             "b.s8.m16n16k16"  => 2,
-                            "b.s8.m8n32k16"  => 4,
-                            "b.s8.m32n8k16"  => 1,
+                            "b.s8.m8n32k16"   => 4,
+                            "b.s8.m32n8k16"   => 1,
 
-                            # "b.f16" => 8,
                             "b.f16.m16n16k16" => 8,
-                            "b.f16.m8n32k16" => 8,
-                            "b.f16.m32n8k16" => 8,
+                            "b.f16.m8n32k16"  => 8,
+                            "b.f16.m32n8k16"  => 8,
 
-			                # "c.s32" => 8,
                             "c.s32.m16n16k16" => 8,
-                            "c.s32.m8n32k16" => 8,
-                            "c.s32.m32n8k16" => 8,
+                            "c.s32.m8n32k16"  => 8,
+                            "c.s32.m32n8k16"  => 8,
 
-                            # "c.f16" => 4,
                             "c.f16.m16n16k16" => 4,
-                            "c.f16.m8n32k16" => 4,
-                            "c.f16.m32n8k16" => 4,
+                            "c.f16.m8n32k16"  => 4,
+                            "c.f16.m32n8k16"  => 4,
 
-                            # "c.f32" => 8,
                             "c.f32.m16n16k16" => 8,
-                            "c.f32.m8n32k16" => 8,
-                            "c.f32.m32n8k16" => 8,
+                            "c.f32.m8n32k16"  => 8,
+                            "c.f32.m32n8k16"  => 8,
                             
-                            # "d.s32" => 8,
                             "d.s32.m16n16k16" => 8,
-                            "d.s32.m8n32k16" => 8,
-                            "d.s32.m32n8k16" => 8,
+                            "d.s32.m8n32k16"  => 8,
+                            "d.s32.m32n8k16"  => 8,
 
-                            # "d.f16" => 4, ------------------
                             "d.f16.m16n16k16" => 4,
-                            "d.f16.m8n32k16" => 4,
-                            "d.f16.m32n8k16" => 4,
+                            "d.f16.m8n32k16"  => 4,
+                            "d.f16.m32n8k16"  => 4,
 
-                            # "d.f32" => 8
                             "d.f32.m16n16k16" => 8,
-                            "d.f32.m8n32k16" => 8,
-                            "d.f32.m32n8k16" => 8,
+                            "d.f32.m8n32k16"  => 8,
+                            "d.f32.m32n8k16"  => 8,
                            )
 
 # Maps PTX AS to CUDA.AS
@@ -94,29 +84,41 @@ const map_ptx_as_to_as_ty = Dict(
                                  "global" => AS.Global
                                 )
 
-ldst_half_ab_ops = ["m16n16k16"], ["a", "b"], ["f16"]
-ldst_half_cd_ops = ["m16n16k16"], ["c", "d"], ["f16", "f32"]
-wmma_half_ops    = ["m16n16k16"], ["f16"], ["f16", "f32"], ["f16", "f32"]
+# Valid WMMA Operation configurations: Shape (M,N,K), Matrix, Element Type
 
-ldst_int_ab_ops = ["m16n16k16"], ["a", "b"], ["u8", "s8"]
-ldst_int_cd_ops = ["m16n16k16"], ["c", "d"], ["s32"]
-wmma_int_ops    = ["m16n16k16"], ["s8", "u8"], ["s32"], ["s32"]
-
-ldst_subint_ab_ops = ["m8n8k32"], ["a", "b"], ["s4","u4"]
-ldst_subint_cd_ops = ["m8n8k32", "m8n8k128"],  ["c", "d"], ["s32"]
+# Half-Precision Floating Point
+ldst_half_ab_ops = [(16,16,16), (32,8,16), (8,32,16)], ["a", "b"], ["f16"]
+ldst_half_cd_ops = [(16,16,16), (32,8,16), (8,32,16)], ["c", "d"], ["f16", "f32"]
+wmma_half_ops    = [(16,16,16), (32,8,16), (8,32,16)], ["f16"], ["f16", "f32"], ["f16", "f32"]
+# Integer
+ldst_int_ab_ops = [(16,16,16), (32,8,16), (8,32,16)], ["a", "b"], ["u8", "s8"]
+ldst_int_cd_ops = [(16,16,16), (32,8,16), (8,32,16)], ["c", "d"], ["s32"]
+wmma_int_ops    = [(16,16,16), (32,8,16), (8,32,16)], ["s8", "u8"], ["s32"], ["s32"]
+# Half-Byte
+ldst_subint_ab_ops = [(8,8,32)],           ["a", "b"], ["s4","u4"]
+ldst_subint_cd_ops = [(8,8,32), (8,128)],  ["c", "d"], ["s32"]
 wmma_subint_ops = []
-
-# Bit load/store c/d operations are the same as s4/u4
-ldst_bit_ab_ops = ["m8n8k128"], ["a", "b"], ["b1"]
+# Bit (load/store c/d operations are the same as s4/u4)
+ldst_bit_ab_ops = [(8,8,128)], ["a", "b"], ["b1"]
 wmma_bit_ops = []
 
-const all_ldst_ops = vcat(ldst_half_ab_ops, ldst_half_cd_ops,
-                          ldst_int_ab_ops,  ldst_int_cd_ops)
-const all_wmma_ops = vcat(wmma_half_ops, wmma_int_ops)
+all_ldst_ops = vcat(ldst_half_ab_ops, ldst_half_cd_ops,
+                    ldst_int_ab_ops,  ldst_int_cd_ops)
+all_wmma_ops = vcat(wmma_half_ops, wmma_int_ops)
+
+valid_shapes = [(16, 16, 16), (32, 8, 16), (8, 32, 16), (8,8,32), (8,8,128)]
 
 ################################################################################
 # HELPER FUNCTIONS
 ################################################################################
+
+# Returns shape information as a string
+function get_hl_shape(M, N, K)
+    if (M, N, K) in valid_shapes
+        return "m$(M)n$(N)k$(K)"
+    end
+    error("Invalid shape for WMMA: (M, N, K) = ($M, $N, $K)")
+end
 
 # Returns (Julia array type, Julia fragment type, fragment size)
 get_frag_info(matrix, ptx_el_type, shape) = (
@@ -171,13 +173,14 @@ llvm_wmma_load() = error("Cannot call llvm_wmma_load without values for placehol
 export llvm_wmma_load
 
 for ops in all_ldst_ops,
-    shape in ops[1],
+    mnk in ops[1],
     mat in ops[2],
     elem_type in ops[3],
     layout in ["col", "row"],
     addr_space in ["", "shared", "global"],
     stride in ["stride"]
 
+    shape = get_hl_shape(mnk[1], mnk[2], mnk[3])
     # TODO: Non-stride versions?
 
     addr_space_int = get_addrspace_info(addr_space)
@@ -225,7 +228,7 @@ llvm_wmma_store() = error("Cannot call llvm_wmma_store without values for placeh
 export llvm_wmma_store
 
     for ops in all_ldst_ops,
-        shape in ops[1],
+        mnk in ops[1],
         mat in ops[2],
         elem_type in ops[3],
         layout in ["col", "row"],
@@ -235,6 +238,9 @@ export llvm_wmma_store
     if mat != "d"
         continue
     end
+
+    shape = get_hl_shape(mnk[1], mnk[2], mnk[3])
+
     # TODO: Non-stride versions?
 
     addr_space_int = get_addrspace_info(addr_space)
@@ -291,12 +297,13 @@ export llvm_wmma_mma
 for ops in all_wmma_ops,
     a_layout in ["col", "row"],
     b_layout in ["col", "row"],
-    shape in ops[1],
+    mnk in ops[1],
     d_elem_type in ops[4],
     c_elem_type in ops[3],
     b_elem_type in ops[2]
 
     a_elem_type = b_elem_type
+    shape = get_hl_shape(mnk[1], mnk[2], mnk[3])
 
     # Name of the LLVM intrinsic
     # If integer A/B types, name is determined by A/B types
@@ -522,14 +529,6 @@ function get_hl_layout(L)
     catch
         error("Invalid layout for WMMA: $L")
     end
-end
-
-function get_hl_shape(M, N, K)
-    if (M, N, K) != (16, 16, 16)
-        error("Invalid shape for WMMA: (M, N, K) = ($M, $N, $K)")
-    end
-
-    return "m$(M)n$(N)k$(K)"
 end
 
 get_hl_mat_use(mat) = map_matrix_to_use[mat]
