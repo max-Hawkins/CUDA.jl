@@ -345,27 +345,3 @@ end
         @test  occursin(r"wmma.store.d.sync(.aligned)?.col.m16n16k16.shared.f32", ptx)
     end
 end
-
-
-
-# // u8/s8 -> s32 @ m16n16k16/m8n32k16/m32n8k16
-# "m16n16k16:a:u8 : 2
-# "m16n16k16:a:s8 : 2
-# "m16n16k16:b:u8 : 2
-# "m16n16k16:b:s8 : 2
-# "m16n16k16:c:s32 : 8
-# "m16n16k16:d:s32 : 8
-
-# "m8n32k16:a:u8") : [llvm_i32_ty],
-# "m8n32k16:a:s8") : [llvm_i32_ty],
-# "m8n32k16:b:u8 : 4
-# "m8n32k16:b:s8 : 4
-# "m8n32k16:c:s32 : 8
-# "m8n32k16:d:s32 : 8
-
-# "m32n8k16:a:u8 : 4
-# "m32n8k16:a:s8 : 4
-# "m32n8k16:b:u8") : [llvm_i32_ty],
-# "m32n8k16:b:s8") : [llvm_i32_ty],
-# "m32n8k16:c:s32 : 8
-# "m32n8k16:d:s32 : 8

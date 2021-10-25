@@ -28,6 +28,7 @@ const map_ptx_to_jl_frag = Dict(
 
 # Maps matrix & PTX types to fragment sizes
 const map_frag_sizes = Dict(
+                            # A
                             "a.u8.m16n16k16"  => 2,
                             "a.u8.m8n32k16"   => 1,
                             "a.u8.m32n8k16"   => 4,
@@ -39,7 +40,7 @@ const map_frag_sizes = Dict(
                             "a.f16.m16n16k16" => 8,
                             "a.f16.m8n32k16"  => 8,
                             "a.f16.m32n8k16"  => 8,
-
+                            # B
                             "b.u8.m16n16k16"  => 2,
                             "b.u8.m8n32k16"   => 4,
                             "b.u8.m32n8k16"   => 1,
@@ -51,7 +52,7 @@ const map_frag_sizes = Dict(
                             "b.f16.m16n16k16" => 8,
                             "b.f16.m8n32k16"  => 8,
                             "b.f16.m32n8k16"  => 8,
-
+                            # C                            
                             "c.s32.m16n16k16" => 8,
                             "c.s32.m8n32k16"  => 8,
                             "c.s32.m32n8k16"  => 8,
@@ -63,7 +64,7 @@ const map_frag_sizes = Dict(
                             "c.f32.m16n16k16" => 8,
                             "c.f32.m8n32k16"  => 8,
                             "c.f32.m32n8k16"  => 8,
-                            
+                            # D
                             "d.s32.m16n16k16" => 8,
                             "d.s32.m8n32k16"  => 8,
                             "d.s32.m32n8k16"  => 8,
@@ -87,26 +88,20 @@ const map_ptx_as_to_as_ty = Dict(
 # Valid WMMA Operation configurations: Shape (M,N,K), Matrix, Element Type
 
 # Half-Precision Floating Point
-ldst_half_ab_ops = [(16,16,16), (32,8,16), (8,32,16)], ["a", "b"], ["f16"]
-ldst_half_cd_ops = [(16,16,16), (32,8,16), (8,32,16)], ["c", "d"], ["f16", "f32"]
-wmma_half_ops    = [(16,16,16), (32,8,16), (8,32,16)], ["f16"], ["f16", "f32"], ["f16", "f32"]
+const ldst_half_ab_ops = [(16,16,16), (32,8,16), (8,32,16)], ["a", "b"], ["f16"]
+const ldst_half_cd_ops = [(16,16,16), (32,8,16), (8,32,16)], ["c", "d"], ["f16", "f32"]
+const wmma_half_ops    = [(16,16,16), (32,8,16), (8,32,16)], ["f16"], ["f16", "f32"], ["f16", "f32"]
 # Integer
-ldst_int_ab_ops = [(16,16,16), (32,8,16), (8,32,16)], ["a", "b"], ["u8", "s8"]
-ldst_int_cd_ops = [(16,16,16), (32,8,16), (8,32,16)], ["c", "d"], ["s32"]
-wmma_int_ops    = [(16,16,16), (32,8,16), (8,32,16)], ["s8", "u8"], ["s32"], ["s32"]
-# Half-Byte
-ldst_subint_ab_ops = [(8,8,32)],           ["a", "b"], ["s4","u4"]
-ldst_subint_cd_ops = [(8,8,32), (8,128)],  ["c", "d"], ["s32"]
-wmma_subint_ops = []
-# Bit (load/store c/d operations are the same as s4/u4)
-ldst_bit_ab_ops = [(8,8,128)], ["a", "b"], ["b1"]
-wmma_bit_ops = []
+const ldst_int_ab_ops = [(16,16,16), (32,8,16), (8,32,16)], ["a", "b"], ["u8", "s8"]
+const ldst_int_cd_ops = [(16,16,16), (32,8,16), (8,32,16)], ["c", "d"], ["s32"]
+const wmma_int_ops    = [(16,16,16), (32,8,16), (8,32,16)], ["s8", "u8"], ["s32"], ["s32"]
 
-all_ldst_ops = vcat(ldst_half_ab_ops, ldst_half_cd_ops,
-                    ldst_int_ab_ops,  ldst_int_cd_ops)
-all_wmma_ops = vcat(wmma_half_ops, wmma_int_ops)
+const all_ldst_ops = vcat(ldst_half_ab_ops, ldst_half_cd_ops,
+                          ldst_int_ab_ops,  ldst_int_cd_ops)
+const all_wmma_ops = vcat(wmma_half_ops, wmma_int_ops)
 
-valid_shapes = [(16, 16, 16), (32, 8, 16), (8, 32, 16), (8,8,32), (8,8,128)]
+# Valid WMMA operation shapes
+const valid_shapes = [(16, 16, 16), (32, 8, 16), (8, 32, 16)]
 
 ################################################################################
 # HELPER FUNCTIONS
@@ -165,9 +160,11 @@ Wrapper around the LLVM intrinsic `@llvm.nvvm.wmma.load.{matrix}.sync.{layout}.{
 # Placeholders
 - `{matrix}`: The matrix to load. Can be `a`, `b` or `c`.
 - `{layout}`: The storage layout for the matrix. Can be `row` or `col`, for row major (C style) or column major (Julia style), respectively.
-- `{shape}`: The overall shape of the MAC operation. The only valid value is `m16n16k16`.
+- `{shape}`: The overall shape of the MAC operation. Valid values are `m16n16k16`, `m32n8k16`, and `m8n32k16`.
 - `{addr_space}`: The address space of `src_addr`. Can be empty (generic addressing), `shared` or `global`.
-- `{elem_type}`: The type of each element in the matrix. Can be `f16` (half precision floating point) or `f32` (full precision floating point). Note that `f32` is only valid for the matrix ``C``.
+- `{elem_type}`: The type of each element in the matrix. For `a` and `b` matrices, valid values are `u8` (byte unsigned integer),
+                `s8` (byte signed integer), and `f16` (half precision floating point). For `c` and `d` matrices, valid values are 
+                `s32` (32-bit signed integer), `f16` (half precision floating point), and `f32` (full precision floating point).
 """
 llvm_wmma_load() = error("Cannot call llvm_wmma_load without values for placeholders!")
 export llvm_wmma_load
@@ -220,9 +217,11 @@ Wrapper around the LLVM intrinsic `@llvm.nvvm.wmma.store.d.sync.{layout}.{shape}
 
 # Placeholders
 - `{layout}`: The storage layout for the matrix. Can be `row` or `col`, for row major (C style) or column major (Julia style), respectively.
-- `{shape}`: The overall shape of the MAC operation. The only valid value is `m16n16k16`.
+- `{shape}`: The overall shape of the MAC operation. Valid values are `m16n16k16`, `m32n8k16`, and `m8n32k16`.
 - `{addr_space}`: The address space of `src_addr`. Can be empty (generic addressing), `shared` or `global`.
-- `{elem_type}`: The type of each element in the matrix. Can be `f16` (half precision floating point) or `f32` (full precision floating point).
+- `{elem_type}`: The type of each element in the matrix. For `a` and `b` matrices, valid values are `u8` (byte unsigned integer),
+                `s8` (byte signed integer), and `f16` (half precision floating point). For `c` and `d` matrices, valid values are 
+                `s32` (32-bit signed integer), `f16` (half precision floating point), and `f32` (full precision floating point).
 """
 llvm_wmma_store() = error("Cannot call llvm_wmma_store without values for placeholders!")
 export llvm_wmma_store
@@ -270,9 +269,11 @@ end
 # --------------------------
 
 @doc """
-    WMMA.llvm_wmma_mma_{a_layout}_{b_layout}_{shape}_{d_elem_type}_{c_elem_type}(a, b, c)
+    WMMA.llvm_wmma_mma_{a_layout}_{b_layout}_{shape}_{d_elem_type}_{c_elem_type}(a, b, c) or
+    WMMA.llvm_wmma_mma_{a_layout}_{b_layout}_{shape}_{a_elem_type}(a, b, c)
 
-Wrapper around the LLVM intrinsic `@llvm.nvvm.wmma.mma.sync.{a_layout}.{b_layout}.{shape}.{d_elem_type}.{c_elem_type}`.
+For floating point operations: wrapper around the LLVM intrinsic `@llvm.nvvm.wmma.mma.sync.{a_layout}.{b_layout}.{shape}.{d_elem_type}.{c_elem_type}`
+For all other operations: wrapper around the LLVM intrinsic `@llvm.nvvm.wmma.mma.sync.{a_layout}.{b_layout}.{shape}.{a_elem_type}`
 
 # Arguments
 - `a`: The WMMA fragment corresponding to the matrix ``A``.
@@ -282,9 +283,10 @@ Wrapper around the LLVM intrinsic `@llvm.nvvm.wmma.mma.sync.{a_layout}.{b_layout
 # Placeholders
 - `{a_layout}`: The storage layout for matrix ``A``. Can be `row` or `col`, for row major (C style) or column major (Julia style), respectively. Note that this must match the layout used in the load operation.
 - `{b_layout}`: The storage layout for matrix ``B``. Can be `row` or `col`, for row major (C style) or column major (Julia style), respectively. Note that this must match the layout used in the load operation.
-- `{shape}`: The overall shape of the MAC operation. The only valid value is `m16n16k16`.
-- `{d_elem_type}`: The type of each element in the resultant ``D`` matrix. Can be `f16` (half precision floating point) or `f32` (full precision floating point).
-- `{c_elem_type}`: The type of each element in the ``C`` matrix. Can be `f16` (half precision floating point) or `f32` (full precision floating point).
+- `{shape}`: The overall shape of the MAC operation. Valid values are `m16n16k16`, `m32n8k16`, and `m8n32k16`.
+- `{a_elem_type}`: The type of each element in the ``A`` matrix. Valid values are `u8` (byte unsigned integer), `s8` (byte signed integer), and `f16` (half precision floating point).
+- `{d_elem_type}`: The type of each element in the resultant ``D`` matrix. Valid values are `s32` (32-bit signed integer), `f16` (half precision floating point), and `f32` (full precision floating point).
+- `{c_elem_type}`: The type of each element in the ``C`` matrix. Valid values are `s32` (32-bit signed integer), `f16` (half precision floating point), and `f32` (full precision floating point).
 
 !!! warning
 
@@ -306,7 +308,7 @@ for ops in all_wmma_ops,
     shape = get_hl_shape(mnk[1], mnk[2], mnk[3])
 
     # Name of the LLVM intrinsic
-    # If integer A/B types, name is determined by A/B types
+    # If integer/sub-byte/bit A/B types, name is determined by A/B types
     if d_elem_type == "s32"
         llvm_intr = "llvm.nvvm.wmma.$shape.mma.$a_layout.$b_layout.$a_elem_type"
         # Name of the Julia wrapper function
