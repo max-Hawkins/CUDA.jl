@@ -497,12 +497,21 @@ const map_layout_ty_to_str = Dict(
 
 # Maps matrix & type to number of elements (size after flattening)
 const map_num_elems = Dict(
+#                            ("a", Int8)    => ,
+#                            ("a", UInt8)   => ,
                            ("a", Float16) => 16,
+
+#                            ("b", Int8)    => ,
+#                            ("b", UInt8)   => ,
                            ("b", Float16) => 16,
+                           
                            ("c", Float16) => 8,
                            ("c", Float32) => 8,
+#                            ("c", Int32)   => ,
+
                            ("d", Float16) => 8,
-                           ("d", Float32) => 8
+                           ("d", Float32) => 8,
+#                            ("d", Int32)   => ,
                           )
 
 # Maps matrix to its use
@@ -545,7 +554,11 @@ function get_hl_frag_info(matrix, T, shape)
     end
 
     try
-        return (map_num_elems[(matrix, T)],
+        # return (map_num_elems[(matrix, T)],
+        #         map_frag_sizes["$matrix.$ptx_ty.$shape"],
+        #         map_ptx_to_jl_frag[ptx_ty],
+        #         ptx_ty)
+        return (map_frag_sizes["$matrix.$ptx_ty.$shape"] * (ptx_ty == "f16" ? 2 : 1),
                 map_frag_sizes["$matrix.$ptx_ty.$shape"],
                 map_ptx_to_jl_frag[ptx_ty],
                 ptx_ty)
@@ -642,15 +655,22 @@ mma
     b_layout = get_hl_layout(B_L)
     shape = get_hl_shape(M, N, K)
 
-    _, a_frag_sz, a_frag_ty, _         = get_hl_frag_info("a", A_T, shape)
+    _, a_frag_sz, a_frag_ty, a_arr_str = get_hl_frag_info("a", A_T, shape)
     _, b_frag_sz, b_frag_ty, _         = get_hl_frag_info("b", B_T, shape)
     _, c_frag_sz, c_frag_ty, c_arr_str = get_hl_frag_info("c", C_T, shape)
-    d_num_els, _, _, d_arr_str         = get_hl_frag_info("d", D_T, shape)
+    d_num_els, _, _, d_arr_str         = get_hl_frag_info("d", D_T, shape)    
 
-    
+    println("------------------------a frag: $a_arr_str")
+    # wrapper = Symbol(join(filter(!isempty, ["llvm", "wmma", "mma", a_layout, b_layout, shape, d_arr_str, c_arr_str]), "_"))
 
-    # Name of the Julia wrapper
-    wrapper = Symbol(join(filter(!isempty, ["llvm", "wmma", "mma", a_layout, b_layout, shape, d_arr_str, c_arr_str]), "_"))
+    # Name of the Julia wrapper (dependent on a/b type)
+    if a_arr_str == "f16"
+        # Floating point mma naming convention
+        wrapper = Symbol(join(filter(!isempty, ["llvm", "wmma", "mma", a_layout, b_layout, shape, d_arr_str, c_arr_str]), "_"))
+    else
+        # Int/subint mma naming convention
+        wrapper = Symbol(join(filter(!isempty, ["llvm", "wmma", "mma", a_layout, b_layout, shape, a_arr_str]), "_"))
+    end
 
     return quote
         a_unfl = unflatten(NTuple{$a_frag_sz, $a_frag_ty}, a.x)

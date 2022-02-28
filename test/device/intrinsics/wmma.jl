@@ -220,66 +220,94 @@ end
     @testset "Flattening" begin
         @test WMMA.flatten(5)                                                                  == (5,)
         @test WMMA.flatten(5.0)                                                                == (5.0,)
-        @test WMMA.flatten(VecElement{Float16}(5))                                             == (Float16(5),)
         @test WMMA.flatten(ntuple(i -> i, 8))                                                  == ntuple(i -> i, 8)
-        @test WMMA.flatten(ntuple(i -> VecElement{Float16}(i), 8))                             == ntuple(i -> Float16(i), 8)
         @test WMMA.flatten(ntuple(i -> ntuple(j -> (i-1) * 2 + j, 2), 8))                      == ntuple(i -> i, 2 * 8)
-        @test WMMA.flatten(ntuple(i -> ntuple(j -> VecElement{Float16}((i-1) * 2 + j), 2), 8)) == ntuple(i -> Float16(i), 2 * 8)
+        for elem_type in [Float16, Int8, UInt8]
+            @test WMMA.flatten(VecElement{elem_type}(5))                                             == (elem_type(5),)
+            @test WMMA.flatten(ntuple(i -> VecElement{elem_type}(i), 8))                             == ntuple(i -> elem_type(i), 8)
+            @test WMMA.flatten(ntuple(i -> ntuple(j -> VecElement{elem_type}((i-1) * 2 + j), 2), 8)) == ntuple(i -> elem_type(i), 2 * 8)
+        end
     end
 
     @testset "Unflattening" begin
         @test WMMA.unflatten(Int64, (5,))                                                               == 5
         @test WMMA.unflatten(Float64, (5.0,))                                                           == 5.0
-        @test WMMA.unflatten(VecElement{Float16}, (Float16(5),))                                        == VecElement{Float16}(5)
         @test WMMA.unflatten(NTuple{8, Int64}, ntuple(i -> i, 8))                                       == ntuple(i -> i, 8)
-        @test WMMA.unflatten(NTuple{8, VecElement{Float16}}, ntuple(i -> Float16(i), 8))                == ntuple(i -> VecElement{Float16}(i), 8)
         @test WMMA.unflatten(NTuple{8, NTuple{2, Int64}}, ntuple(i -> i, 2 * 8))                        == ntuple(i -> ntuple(j -> (i-1) * 2 + j, 2), 8)
-        @test WMMA.unflatten(NTuple{8, NTuple{2, VecElement{Float16}}}, ntuple(i -> Float16(i), 2 * 8)) == ntuple(i -> ntuple(j -> VecElement{Float16}((i-1) * 2 + j), 2), 8)
+        for elem_type in [Float16, Int8, UInt8]
+            @test WMMA.unflatten(VecElement{elem_type}, (elem_type(5),))                                        == VecElement{elem_type}(5)
+            @test WMMA.unflatten(NTuple{8, VecElement{elem_type}}, ntuple(i -> elem_type(i), 8))                == ntuple(i -> VecElement{elem_type}(i), 8)
+            @test WMMA.unflatten(NTuple{8, NTuple{2, VecElement{elem_type}}}, ntuple(i -> elem_type(i), 2 * 8)) == ntuple(i -> ntuple(j -> VecElement{elem_type}((i-1) * 2 + j), 2), 8)
+        end
     end
 end
 
 ################################################################################
 
 @testset "Broadcasting over fragments: size=$sz, type=$ty" for sz = [1, 2, 5],
-        ty = [Float16, Float32]
-        @test ty(5) .* Fragment{16, 16, 16, sz, ty, RowMajor, MatrixA}(ntuple(i -> ty(i), sz)) == Fragment{16, 16, 16, sz, ty, RowMajor, MatrixA}(ntuple(i -> ty(5 * i), sz))
-        @test ty(5) .+ Fragment{16, 16, 16, sz, ty, RowMajor, MatrixA}(ntuple(i -> ty(i), sz)) == Fragment{16, 16, 16, sz, ty, RowMajor, MatrixA}(ntuple(i -> ty(5 + i), sz))
+        ty = [Int8, UInt8, Int32, Float16, Float32],
+        mnk = [(16,16,16), (32,8,16), (8,32,16)]
+        @test ty(5) .* Fragment{mnk[1], mnk[2], mnk[3], sz, ty, RowMajor, MatrixA}(ntuple(i -> ty(i), sz)) == Fragment{mnk[1], mnk[2], mnk[3], sz, ty, RowMajor, MatrixA}(ntuple(i -> ty(5 * i), sz))
+        @test ty(5) .+ Fragment{mnk[1], mnk[2], mnk[3], sz, ty, RowMajor, MatrixA}(ntuple(i -> ty(i), sz)) == Fragment{mnk[1], mnk[2], mnk[3], sz, ty, RowMajor, MatrixA}(ntuple(i -> ty(5 + i), sz))
 end
 
 ################################################################################
 
 @testset "CUDA C-style API" begin
-    @testset "$(do_mac ? "MAC" : "MUL"): A: $a_layout, B: $b_layout, C: $c_layout, D: $d_layout, C type: $c_type, D type: $d_type" for a_layout in [ColMajor, RowMajor],
+    @testset "$(do_mac ? "MAC" : "MUL"): A: $a_layout, B: $b_layout, C: $c_layout, D: $d_layout, A/B Type: $ab_type, C type: $c_type, D type: $d_type" for ops in CUDA.WMMA.all_wmma_ops,
+        a_layout in [ColMajor, RowMajor],
         b_layout in [ColMajor, RowMajor],
         c_layout in [ColMajor, RowMajor],
         d_layout in [ColMajor, RowMajor],
-        c_type in [Float16, Float32],
-        d_type in [Float16, Float32],
+        mnk in ops[1],
+        ab_type in ops[2],
+        d_type  in ops[4],
+        c_type  in ops[3],
         do_mac in [true, false]
 
-        a     = rand(Float16, (16, 16))
-        b     = rand(Float16, (16, 16))
-        c     = rand(c_type, (16, 16))
-        d     = Array{d_type}(undef, (16, 16))
+        # Convert string types to Julia Types
+        ab_ty = CUDA.WMMA.map_ptx_to_jl_array[ab_type]
+        c_ty  = CUDA.WMMA.map_ptx_to_jl_array[c_type]
+        d_ty  = CUDA.WMMA.map_ptx_to_jl_array[d_type]
+        # Calculate fragment shapes
+        a_shape   = get_array_shape("a", mnk, CUDA.WMMA.get_hl_layout(a_layout))
+        b_shape   = get_array_shape("b", mnk, CUDA.WMMA.get_hl_layout(b_layout))
+        c_shape   = get_array_shape("c", mnk, CUDA.WMMA.get_hl_layout(c_layout))
+        d_shape   = get_array_shape("d", mnk, CUDA.WMMA.get_hl_layout(d_layout))
+
+        shape = CUDA.WMMA.get_hl_shape(mnk[1], mnk[2], mnk[3])
+    
+    # a_layout in [ColMajor, RowMajor],
+    #     b_layout in [ColMajor, RowMajor],
+    #     c_layout in [ColMajor, RowMajor],
+    #     d_layout in [ColMajor, RowMajor],
+    #     c_type in [Float16, Float32],
+    #     d_type in [Float16, Float32],
+    #     do_mac in [true, false]
+
+        a     = rand(ab_ty, a_shape)
+        b     = rand(ab_ty, b_shape)
+        c     = rand(c_ty, c_shape)
+        d     = Array{d_ty}(undef, d_shape)
 
         a_dev = CuArray(a)
         b_dev = CuArray(b)
         c_dev = CuArray(c)
         d_dev = CuArray(d)
 
-        alpha = rand(Float16)
-        beta  = rand(c_type)
+        alpha = rand(ab_ty)
+        beta  = rand(c_ty)
 
         @eval function kernel(a_dev, b_dev, c_dev, d_dev, alpha, beta)
-            conf = Config{16, 16, 16, $d_type}
+            conf = Config{$mnk[1], $mnk[2], $mnk[3], $d_ty}
 
-            a_frag = load_a(pointer(a_dev), 16, $a_layout, conf)
-            b_frag = load_b(pointer(b_dev), 16, $b_layout, conf)
+            a_frag = load_a(pointer(a_dev), $a_shape[1], $a_layout, conf)
+            b_frag = load_b(pointer(b_dev), $b_shape[1], $b_layout, conf)
 
             if $do_mac
-                c_frag = load_c(pointer(c_dev), 16, $c_layout, conf)
+                c_frag = load_c(pointer(c_dev), $c_shape[1], $c_layout, conf)
             else
-                c_frag = fill_c($c_type(0), conf)
+                c_frag = fill_c($c_ty(0), conf)
             end
 
             a_frag = alpha .* a_frag
@@ -287,7 +315,7 @@ end
 
             d_frag = mma(a_frag, b_frag, c_frag, conf)
 
-            store_d(pointer(d_dev), d_frag, 16, $d_layout, conf)
+            store_d(pointer(d_dev), d_frag, $d_shape[1], $d_layout, conf)
 
             return
         end
@@ -301,9 +329,21 @@ end
         new_d = (d_layout == ColMajor) ? d : transpose(d)
 
         if do_mac
-            @test alpha * new_a * new_b + beta * new_c ≈ new_d rtol=Base.rtoldefault(Float16)
+            # Alter test depending on a/b element Type
+            if ab_ty == Float16
+                @test alpha * new_a * new_b + beta * new_c ≈ new_d rtol=Base.rtoldefault(Float16)
+            else # Cast a and b to prevent UInt8 rollover of resultant data  
+                @test alpha * new_a * new_b + beta * new_c == new_d          
+            end
+            
         else
-            @test alpha * new_a * new_b ≈ new_d rtol=Base.rtoldefault(Float16)
+            # Alter test depending on a/b element Type
+            if ab_ty == Float16
+                @test alpha * new_a * new_b ≈ new_d rtol=Base.rtoldefault(Float16)
+            else # Cast a and b to prevent UInt8 rollover of resultant data  
+                @test alpha * Int32.(new_a) * Int32.(new_b) == new_d          
+            end
+            
         end
     end
 
